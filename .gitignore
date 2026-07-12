@@ -1,0 +1,8 @@
+*.o
+*.out
+/build/
+/bin/
+.vscode/
+*.exe
+data/*
+!data/README.md
