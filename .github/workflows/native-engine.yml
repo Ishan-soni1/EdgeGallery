@@ -1,0 +1,28 @@
+name: Native engine
+
+on:
+  push:
+    paths:
+      - "native-engine/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/native-engine.yml"
+  pull_request:
+    paths:
+      - "native-engine/**"
+      - "CMakeLists.txt"
+      - ".github/workflows/native-engine.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build --build-config Release --output-on-failure

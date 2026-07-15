@@ -4,5 +4,12 @@
 /bin/
 .vscode/
 *.exe
+*.obj
+*.pdb
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 data/*
 !data/README.md
