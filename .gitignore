@@ -6,6 +6,15 @@
 *.exe
 *.obj
 *.pdb
+.gradle/
+.android/
+android-sdk/
+.idea/
+**/build/
+**/.cxx/
+**/.externalNativeBuild/
+local.properties
+captures/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

@@ -1,32 +1,60 @@
 # EdgeGallery
-Phone galleries accumulate exact duplicates, compressed copies, burst shots and unusable images. Existing cleanup tools can be opaque or cloud-dependent. EdgeGallery will scan selected media locally, identify likely duplicate/low-quality groups, explain its recommendation and allow the user to decide what to retain or delete.
 
-## Current milestone
+EdgeGallery is a readable, privacy-first Android MVP that analyses photos chosen
+through the system Photo Picker. It reports exact duplicates, visually similar
+groups and simple exposure warnings. It does not upload, recommend or delete
+photos.
 
-The native C++17 engine now includes the first tested algorithmic slice:
+## What works
 
-- exact grouping from a content hash;
-- near-duplicate grouping from a 64-bit perceptual hash and configurable Hamming threshold;
-- transitive clustering with Disjoint Set Union;
-- deterministic group and member ordering for a stable UI contract;
-- input validation, unit tests and CI.
+- Kotlin/Compose Android application with select, scan, progress and results screens.
+- Streaming SHA-256 for byte-identical files.
+- 64-bit dHash calculated from a 9x8 grayscale thumbnail.
+- Simple underexposure/overexposure warnings from a 64x64 thumbnail.
+- JNI bridge from Kotlin to the C++17 engine.
+- Brute-force Hamming comparisons and DSU clustering in C++.
+- Native and Kotlin unit tests plus GitHub Actions workflows.
 
-The engine accepts precomputed fingerprints for now. Image decoding, SHA-256 and perceptual-hash extraction will be added as separate, reviewable changes.
+## Data flow
 
-## Build and test the native engine
-
-Requirements: a C++17 compiler and CMake 3.16 or newer.
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-ctest --test-dir build --build-config Release --output-on-failure
+```text
+Photo Picker -> ImageProcessor -> SHA-256/dHash/exposure
+             -> JNI -> C++ brute-force clustering
+             -> ViewModel -> Compose results
 ```
 
-For a quick local check without CMake:
+Kotlin handles Android file access and feature extraction. Only compact hashes
+cross JNI. The C++ engine never receives full image data.
+
+## Project structure
+
+```text
+android-app/       Kotlin, Compose, Android resources and JNI adapter
+native-engine/     Platform-independent C++ clustering library and tests
+data/              Local test-data instructions (actual images are ignored)
+.github/workflows/ Native and Android continuous integration
+```
+
+## Build the Android app
+
+Install Android Studio with Android SDK 36, NDK `27.0.12077973`, CMake `3.22.1`
+and JDK 17. Then open `android-app` in Android Studio or run:
+
+```powershell
+cd android-app
+.\gradlew.bat testDebugUnitTest assembleDebug
+```
+
+The debug APK is created under:
+
+```text
+android-app/app/build/outputs/apk/debug/app-debug.apk
+```
+
+## Test the native engine without Android
 
 ```sh
-g++ -std=c++17 -Wall -Wextra -Wpedantic \
+g++ -std=c++17 -Wall -Wextra -Wpedantic -Werror \
   -Inative-engine/include \
   native-engine/src/duplicate_clusterer.cpp \
   native-engine/tests/duplicate_clusterer_test.cpp \
@@ -34,6 +62,21 @@ g++ -std=c++17 -Wall -Wextra -Wpedantic \
 ./edgegallery_engine_tests
 ```
 
-## Privacy and safety
+## Manual MVP test
 
-EdgeGallery is designed for on-device analysis. Images are not uploaded, full file paths or image contents should not be logged, and media must never be deleted without an explicit platform confirmation from the user.
+Select an original image, an exact copy, a resized/recompressed copy, an
+unrelated image, a dark image and a bright image. Confirm that the app shows:
+
+- the original and exact copy in an exact group;
+- the resized/recompressed copy in a visually similar group when its dHash is
+  within the configured threshold;
+- the dark and bright images under exposure warnings;
+- no unrelated image in a duplicate group.
+
+## Known limits
+
+- At most 100 photos can be selected in one scan.
+- Scans are sequential and are not persisted.
+- dHash can struggle with rotation, large crops, mirroring and major edits.
+- Exposure thresholds are simple MVP heuristics, not photographic judgement.
+- Brute-force similarity search is O(n^2) and has not yet been benchmarked.
