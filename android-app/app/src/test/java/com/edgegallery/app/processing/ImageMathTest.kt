@@ -7,29 +7,6 @@ import org.junit.Test
 class ImageMathTest {
 
     @Test
-    fun `dHash is zero when every row grows brighter from left to right`() {
-        val luminance = IntArray(
-            ImageMath.DIFFERENCE_HASH_WIDTH * ImageMath.DIFFERENCE_HASH_HEIGHT,
-        ) { index ->
-            index % ImageMath.DIFFERENCE_HASH_WIDTH
-        }
-
-        assertEquals(0L, ImageMath.calculateDifferenceHash(luminance))
-    }
-
-    @Test
-    fun `dHash sets every bit when every row grows darker from left to right`() {
-        val luminance = IntArray(
-            ImageMath.DIFFERENCE_HASH_WIDTH * ImageMath.DIFFERENCE_HASH_HEIGHT,
-        ) { index ->
-            ImageMath.DIFFERENCE_HASH_WIDTH - index % ImageMath.DIFFERENCE_HASH_WIDTH
-        }
-
-        // A signed Long with all 64 bits set is represented as -1.
-        assertEquals(-1L, ImageMath.calculateDifferenceHash(luminance))
-    }
-
-    @Test
     fun `dark image is reported as underexposed`() {
         val result = ImageMath.analyzeExposure(IntArray(64 * 64) { 10 })
 

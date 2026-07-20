@@ -15,13 +15,33 @@ object NativeEngine {
 
     fun findDuplicateGroups(
         features: List<ImageFeatures>,
-        hammingThreshold: Int = 8,
+        similarityThreshold: Float = DEFAULT_SIMILARITY_THRESHOLD,
     ): List<DuplicateGroup> {
         if (features.size < 2) return emptyList()
 
+        val embeddingDimension = features.first().embedding.size
+        if (embeddingDimension == 0) return emptyList()
+
         val contentHashes = Array(features.size) { index -> features[index].sha256 }
-        val differenceHashes = LongArray(features.size) { index -> features[index].differenceHash }
-        val encodedGroups = clusterNative(contentHashes, differenceHashes, hammingThreshold)
+
+        // Flatten all embeddings into a single contiguous array for efficient
+        // JNI transfer. This avoids N separate object references across the
+        // JNI boundary.
+        val flatEmbeddings = FloatArray(features.size * embeddingDimension)
+        for (index in features.indices) {
+            features[index].embedding.copyInto(
+                destination = flatEmbeddings,
+                destinationOffset = index * embeddingDimension,
+            )
+        }
+
+        val encodedGroups = clusterNative(
+            contentHashes,
+            flatEmbeddings,
+            embeddingDimension,
+            features.size,
+            similarityThreshold,
+        )
 
         return decodeGroups(encodedGroups, features)
     }
@@ -65,7 +85,11 @@ object NativeEngine {
 
     private external fun clusterNative(
         contentHashes: Array<String>,
-        differenceHashes: LongArray,
-        hammingThreshold: Int,
+        embeddings: FloatArray,
+        embeddingDimension: Int,
+        imageCount: Int,
+        similarityThreshold: Float,
     ): IntArray
+
+    private const val DEFAULT_SIMILARITY_THRESHOLD = 0.85f
 }

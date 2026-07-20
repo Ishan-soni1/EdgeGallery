@@ -8,6 +8,7 @@ import com.edgegallery.app.model.ImageFeatures
 import com.edgegallery.app.model.ScanIssue
 import com.edgegallery.app.model.ScanUiState
 import com.edgegallery.app.nativebridge.NativeEngine
+import com.edgegallery.app.processing.EmbeddingExtractor
 import com.edgegallery.app.processing.ImageProcessor
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +18,8 @@ import kotlinx.coroutines.launch
 
 /** Coordinates selection, sequential image analysis, native grouping and UI state. */
 class EdgeGalleryViewModel(application: Application) : AndroidViewModel(application) {
-    private val imageProcessor = ImageProcessor(application.contentResolver)
+    private val embeddingExtractor = EmbeddingExtractor(application)
+    private val imageProcessor = ImageProcessor(application.contentResolver, embeddingExtractor)
     private val mutableUiState = MutableStateFlow<ScanUiState>(ScanUiState.Ready())
     private var scanJob: Job? = null
 
@@ -73,5 +75,10 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
 
     fun reset() {
         mutableUiState.value = ScanUiState.Ready()
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        embeddingExtractor.close()
     }
 }

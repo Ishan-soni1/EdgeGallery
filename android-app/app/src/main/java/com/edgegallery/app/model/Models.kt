@@ -8,9 +8,30 @@ data class ImageFeatures(
     val uri: Uri,
     val displayName: String,
     val sha256: String,
-    val differenceHash: Long,
+    val embedding: FloatArray,
     val exposure: ExposureResult,
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ImageFeatures) return false
+        return id == other.id &&
+            uri == other.uri &&
+            displayName == other.displayName &&
+            sha256 == other.sha256 &&
+            embedding.contentEquals(other.embedding) &&
+            exposure == other.exposure
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + uri.hashCode()
+        result = 31 * result + displayName.hashCode()
+        result = 31 * result + sha256.hashCode()
+        result = 31 * result + embedding.contentHashCode()
+        result = 31 * result + exposure.hashCode()
+        return result
+    }
+}
 
 enum class ExposureClass {
     UNDEREXPOSED,

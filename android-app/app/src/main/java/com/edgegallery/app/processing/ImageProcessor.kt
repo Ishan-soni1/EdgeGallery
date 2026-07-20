@@ -13,28 +13,37 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /** Reads one selected URI and calculates all features needed by the MVP. */
-class ImageProcessor(private val contentResolver: ContentResolver) {
+class ImageProcessor(
+    private val contentResolver: ContentResolver,
+    private val embeddingExtractor: EmbeddingExtractor,
+) {
 
     suspend fun analyze(uri: Uri): ImageFeatures = withContext(Dispatchers.IO) {
         val displayName = findDisplayName(uri)
         val sha256 = calculateSha256(uri)
-        val thumbnail = decodeThumbnail(uri)
 
-        try {
-            val exposureLuminance = readLuminance(thumbnail)
-            val differenceHashLuminance = readDifferenceHashLuminance(thumbnail)
-
-            ImageFeatures(
-                id = uri.toString(),
-                uri = uri,
-                displayName = displayName,
-                sha256 = sha256,
-                differenceHash = ImageMath.calculateDifferenceHash(differenceHashLuminance),
-                exposure = ImageMath.analyzeExposure(exposureLuminance),
-            )
+        val exposureThumbnail = decodeThumbnail(uri, EXPOSURE_THUMBNAIL_SIZE)
+        val exposureLuminance = try {
+            readLuminance(exposureThumbnail)
         } finally {
-            thumbnail.recycle()
+            exposureThumbnail.recycle()
         }
+
+        val embeddingThumbnail = decodeThumbnail(uri, EMBEDDING_THUMBNAIL_SIZE)
+        val embedding = try {
+            embeddingExtractor.extract(embeddingThumbnail)
+        } finally {
+            embeddingThumbnail.recycle()
+        }
+
+        ImageFeatures(
+            id = uri.toString(),
+            uri = uri,
+            displayName = displayName,
+            sha256 = sha256,
+            embedding = embedding,
+            exposure = ImageMath.analyzeExposure(exposureLuminance),
+        )
     }
 
     /** Streams bytes into SHA-256 instead of loading a complete photo into memory. */
@@ -58,29 +67,14 @@ class ImageProcessor(private val contentResolver: ContentResolver) {
     }
 
     /**
-     * ImageDecoder handles content URIs and EXIF orientation. A 64x64 software
-     * bitmap is enough for dHash and the deliberately simple exposure warning.
+     * ImageDecoder handles content URIs and EXIF orientation. A software bitmap
+     * at the requested size is enough for feature extraction.
      */
-    private fun decodeThumbnail(uri: Uri): Bitmap {
+    private fun decodeThumbnail(uri: Uri, size: Int): Bitmap {
         val source = ImageDecoder.createSource(contentResolver, uri)
         return ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
             decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-            decoder.setTargetSize(EXPOSURE_THUMBNAIL_SIZE, EXPOSURE_THUMBNAIL_SIZE)
-        }
-    }
-
-    private fun readDifferenceHashLuminance(thumbnail: Bitmap): IntArray {
-        val scaledBitmap = Bitmap.createScaledBitmap(
-            thumbnail,
-            ImageMath.DIFFERENCE_HASH_WIDTH,
-            ImageMath.DIFFERENCE_HASH_HEIGHT,
-            true,
-        )
-
-        return try {
-            readLuminance(scaledBitmap)
-        } finally {
-            if (scaledBitmap !== thumbnail) scaledBitmap.recycle()
+            decoder.setTargetSize(size, size)
         }
     }
 
@@ -110,5 +104,6 @@ class ImageProcessor(private val contentResolver: ContentResolver) {
 
     private companion object {
         const val EXPOSURE_THUMBNAIL_SIZE = 64
+        const val EMBEDDING_THUMBNAIL_SIZE = 224
     }
 }
