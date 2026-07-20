@@ -1,7 +1,8 @@
 # MobileNet V3 Small — Feature Vector (TFLite)
 
 This directory must contain the TFLite model file used by EdgeGallery for
-on-device duplicate detection via deep-learning embeddings.
+on-device semantic-similarity detection via deep-learning embeddings. SHA-256
+and dHash remain responsible for exact and near-duplicate evidence.
 
 ## Required file
 

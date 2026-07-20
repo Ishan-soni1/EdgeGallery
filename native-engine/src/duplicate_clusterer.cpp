@@ -1,9 +1,8 @@
 #include "edgegallery/duplicate_clusterer.hpp"
-using namespace std;
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <numeric>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -12,162 +11,181 @@ using namespace std;
 namespace edgegallery {
 namespace {
 
-class DisjointSet {
-public:
-    explicit DisjointSet(size_t size) : parent_(size), rank_(size, 0) {
-        iota(parent_.begin(), parent_.end(), 0);
-    }
+template <typename Matches>
+std::vector<std::vector<std::size_t>> build_complete_link_groups(
+    const std::vector<std::size_t>& candidates,
+    Matches matches) {
+    std::vector<std::vector<std::size_t>> groups;
 
-    size_t find(size_t item) {
-        if (parent_[item] != item) {
-            parent_[item] = find(parent_[item]);
+    for (const std::size_t candidate : candidates) {
+        bool added = false;
+        for (auto& group : groups) {
+            const bool matches_every_member = std::all_of(
+                group.begin(), group.end(), [&](std::size_t member) {
+                    return matches(candidate, member);
+                });
+            if (matches_every_member) {
+                group.push_back(candidate);
+                added = true;
+                break;
+            }
         }
-        return parent_[item];
-    }
 
-    void unite(size_t left, size_t right) {
-        left = find(left);
-        right = find(right);
-        if (left == right) {
-            return;
-        }
-
-        if (rank_[left] < rank_[right]) {
-            swap(left, right);
-        }
-        parent_[right] = left;
-        if (rank_[left] == rank_[right]) {
-            ++rank_[left];
+        if (!added) {
+            groups.push_back({candidate});
         }
     }
 
-private:
-    vector<std::size_t> parent_;
-    vector<std::uint8_t> rank_;
-};
-
-bool all_content_hashes_match(
-    const vector<ImageFingerprint>& images,
-    const vector<std::size_t>& members) {
-    const string& expected = images[members.front()].content_hash;
-    if (expected.empty()) {
-        return false;
-    }
-
-    return all_of(
-        members.begin(), members.end(), [&](size_t index) {
-            return images[index].content_hash == expected;
-        });
+    return groups;
 }
 
 }  // namespace
 
-float cosine_similarity(const vector<float>& left,
-                        const vector<float>& right) noexcept {
+std::uint32_t hamming_distance(std::uint64_t left, std::uint64_t right) noexcept {
+    std::uint64_t difference = left ^ right;
+    std::uint32_t distance = 0;
+    while (difference != 0) {
+        difference &= difference - 1;
+        ++distance;
+    }
+    return distance;
+}
+
+float cosine_similarity(
+    const std::vector<float>& left,
+    const std::vector<float>& right) noexcept {
     if (left.empty() || right.empty() || left.size() != right.size()) {
         return 0.0f;
     }
 
-    float dot = 0.0f;
-    float mag_left = 0.0f;
-    float mag_right = 0.0f;
-
-    for (size_t i = 0; i < left.size(); ++i) {
-        dot += left[i] * right[i];
-        mag_left += left[i] * left[i];
-        mag_right += right[i] * right[i];
+    double dot = 0.0;
+    double magnitude_left = 0.0;
+    double magnitude_right = 0.0;
+    for (std::size_t index = 0; index < left.size(); ++index) {
+        dot += static_cast<double>(left[index]) * right[index];
+        magnitude_left += static_cast<double>(left[index]) * left[index];
+        magnitude_right += static_cast<double>(right[index]) * right[index];
     }
 
-    const float denominator = std::sqrt(mag_left) * std::sqrt(mag_right);
-    if (denominator == 0.0f) {
+    const double denominator = std::sqrt(magnitude_left) * std::sqrt(magnitude_right);
+    if (denominator == 0.0) {
         return 0.0f;
     }
-
-    return dot / denominator;
+    return static_cast<float>(dot / denominator);
 }
 
-vector<DuplicateGroup> cluster_duplicates(
-    const vector<ImageFingerprint>& images,
+std::vector<DuplicateGroup> cluster_duplicates(
+    const std::vector<ImageFingerprint>& images,
     const ClusterOptions& options) {
-    if (options.similarity_threshold < 0.0f || options.similarity_threshold > 1.0f) {
-        throw invalid_argument("similarity_threshold must be between 0.0 and 1.0");
+    if (options.hamming_threshold > 64) {
+        throw std::invalid_argument("hamming_threshold must be between 0 and 64");
+    }
+    if (!std::isfinite(options.similarity_threshold) ||
+        options.similarity_threshold < 0.0f ||
+        options.similarity_threshold > 1.0f) {
+        throw std::invalid_argument("similarity_threshold must be between 0.0 and 1.0");
     }
 
     std::unordered_set<std::string> ids;
     ids.reserve(images.size());
+    std::size_t embedding_dimension = 0;
     for (const auto& image : images) {
         if (image.id.empty()) {
-            throw invalid_argument("image id must not be empty");
+            throw std::invalid_argument("image id must not be empty");
         }
         if (!ids.insert(image.id).second) {
-            throw invalid_argument("image ids must be unique");
+            throw std::invalid_argument("image ids must be unique");
+        }
+        if (!image.embedding.empty()) {
+            if (embedding_dimension == 0) {
+                embedding_dimension = image.embedding.size();
+            } else if (image.embedding.size() != embedding_dimension) {
+                throw std::invalid_argument("embedding dimensions must match");
+            }
+            if (!std::all_of(image.embedding.begin(), image.embedding.end(), [](float value) {
+                    return std::isfinite(value);
+                })) {
+                throw std::invalid_argument("embeddings must contain finite values");
+            }
         }
     }
 
-    DisjointSet groups(images.size());
-
-    std::unordered_map<string, size_t> exact_hash_owner;
-    exact_hash_owner.reserve(images.size());
-    for (size_t index = 0; index < images.size(); ++index) {
+    // Exact groups are produced independently, so a semantic neighbour can
+    // never relabel or hide a byte-identical SHA-256 group.
+    std::unordered_map<std::string, std::size_t> exact_group_by_hash;
+    exact_group_by_hash.reserve(images.size());
+    std::vector<std::vector<std::size_t>> exact_groups;
+    for (std::size_t index = 0; index < images.size(); ++index) {
         const auto& content_hash = images[index].content_hash;
         if (content_hash.empty()) {
             continue;
         }
 
-        const auto insertion = exact_hash_owner.emplace(content_hash, index);
-        if (!insertion.second) {
-            groups.unite(index, insertion.first->second);
+        const auto insertion = exact_group_by_hash.emplace(content_hash, exact_groups.size());
+        if (insertion.second) {
+            exact_groups.push_back({index});
+        } else {
+            exact_groups[insertion.first->second].push_back(index);
         }
     }
 
-    // This intentionally starts with a clear O(n^2) baseline. A metric index
-    // should replace it only after profiling shows a meaningful benefit.
-    for (size_t left = 0; left < images.size(); ++left) {
-        if (images[left].embedding.empty()) {
+    std::vector<DuplicateGroup> result;
+    for (const auto& members : exact_groups) {
+        if (members.size() < 2) {
             continue;
         }
-        for (size_t right = left + 1; right < images.size(); ++right) {
-            if (images[right].embedding.empty()) {
-                continue;
-            }
-            if (cosine_similarity(
-                    images[left].embedding,
-                    images[right].embedding) >= options.similarity_threshold) {
-                groups.unite(left, right);
-            }
-        }
-    }
-
-    unordered_map<size_t, vector<std::size_t>> members_by_root;
-    members_by_root.reserve(images.size());
-    for (size_t index = 0; index < images.size(); ++index) {
-        members_by_root[groups.find(index)].push_back(index);
-    }
-
-    vector<std::vector<std::size_t>> ordered_groups;
-    ordered_groups.reserve(members_by_root.size());
-    for (auto& entry : members_by_root) {
-        auto& members = entry.second;
-        if (options.include_singletons || members.size() > 1) {
-            ordered_groups.push_back(std::move(members));
-        }
-    }
-    sort(ordered_groups.begin(), ordered_groups.end(), [](const auto& left, const auto& right) {
-        return left.front() < right.front();
-    });
-
-    vector<DuplicateGroup> result;
-    result.reserve(ordered_groups.size());
-    for (const auto& members : ordered_groups) {
-        DuplicateGroup group;
-        group.kind = all_content_hashes_match(images, members)
-            ? DuplicateKind::Exact
-            : DuplicateKind::VisuallySimilar;
+        DuplicateGroup group{DuplicateKind::Exact, {}};
         group.member_ids.reserve(members.size());
-        for (size_t index : members) {
+        for (const std::size_t index : members) {
             group.member_ids.push_back(images[index].id);
         }
-        result.push_back(move(group));
+        result.push_back(std::move(group));
+    }
+
+    // Compare one representative for each exact hash. Exact copies are already
+    // reported above and should not inflate a visually-similar group.
+    std::unordered_set<std::string> represented_hashes;
+    represented_hashes.reserve(images.size());
+    std::vector<std::size_t> representatives;
+    representatives.reserve(images.size());
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        const auto& content_hash = images[index].content_hash;
+        if (content_hash.empty() || represented_hashes.insert(content_hash).second) {
+            representatives.push_back(index);
+        }
+    }
+
+    const auto visually_matches = [&](std::size_t left, std::size_t right) {
+        const bool near_duplicate =
+            images[left].has_perceptual_hash &&
+            images[right].has_perceptual_hash &&
+            hamming_distance(
+                images[left].perceptual_hash,
+                images[right].perceptual_hash) <= options.hamming_threshold;
+
+        const bool semantic_match =
+            !images[left].embedding.empty() &&
+            !images[right].embedding.empty() &&
+            cosine_similarity(
+                images[left].embedding,
+                images[right].embedding) >= options.similarity_threshold;
+
+        return near_duplicate || semantic_match;
+    };
+
+    // Complete-link grouping requires a new image to match every existing
+    // member. This prevents A~B and B~C from grouping A with an unrelated C.
+    const auto visual_groups = build_complete_link_groups(representatives, visually_matches);
+    for (const auto& members : visual_groups) {
+        if (!options.include_singletons && members.size() < 2) {
+            continue;
+        }
+        DuplicateGroup group{DuplicateKind::VisuallySimilar, {}};
+        group.member_ids.reserve(members.size());
+        for (const std::size_t index : members) {
+            group.member_ids.push_back(images[index].id);
+        }
+        result.push_back(std::move(group));
     }
 
     return result;

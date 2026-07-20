@@ -53,9 +53,9 @@ android {
         }
     }
 
-    // Prevent the build from compressing the TFLite model file, which must be
-    // memory-mapped at runtime.
-    aaptOptions {
+    // Keep the bundled model uncompressed so it can be memory-mapped instead
+    // of copied into the managed heap at runtime.
+    androidResources {
         noCompress += "tflite"
     }
 
@@ -77,9 +77,9 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
-    // TensorFlow Lite for on-device MobileNet embedding inference.
-    implementation("org.tensorflow:tensorflow-lite:2.17.0")
-    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
+    // LiteRT is TensorFlow Lite's supported successor. Version 1.4+ ships
+    // native libraries compatible with Android's 16 KB page-size devices.
+    implementation("com.google.ai.edge.litert:litert:1.4.0")
 
     testImplementation("junit:junit:4.13.2")
 

@@ -2,8 +2,8 @@
 
 #include <cmath>
 #include <cstdlib>
-#include <exception>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,74 +35,91 @@ void expect_invalid_argument(Action action, const std::string& message) {
     }
 }
 
-void test_cosine_similarity() {
-    // Identical unit vectors have similarity 1.0.
-    std::vector<float> a = {1.0f, 0.0f, 0.0f};
-    float sim = edgegallery::cosine_similarity(a, a);
-    expect(std::abs(sim - 1.0f) < 1e-6f, "identical vectors have similarity 1.0");
-
-    // Orthogonal vectors have similarity 0.0.
-    std::vector<float> b = {0.0f, 1.0f, 0.0f};
-    sim = edgegallery::cosine_similarity(a, b);
-    expect(std::abs(sim) < 1e-6f, "orthogonal vectors have similarity 0.0");
-
-    // Opposite vectors have similarity -1.0.
-    std::vector<float> c = {-1.0f, 0.0f, 0.0f};
-    sim = edgegallery::cosine_similarity(a, c);
-    expect(std::abs(sim + 1.0f) < 1e-6f, "opposite vectors have similarity -1.0");
-
-    // Empty vectors return 0.0.
-    std::vector<float> empty;
-    sim = edgegallery::cosine_similarity(empty, a);
-    expect(sim == 0.0f, "empty vector returns similarity 0.0");
-
-    // Mismatched sizes return 0.0.
-    std::vector<float> short_vec = {1.0f, 2.0f};
-    sim = edgegallery::cosine_similarity(a, short_vec);
-    expect(sim == 0.0f, "mismatched sizes return similarity 0.0");
+void test_hamming_distance() {
+    expect(edgegallery::hamming_distance(0, 0) == 0, "equal hashes have distance zero");
+    expect(edgegallery::hamming_distance(0, 0xFULL) == 4, "changed bits are counted");
+    expect(
+        edgegallery::hamming_distance(0, ~std::uint64_t{0}) == 64,
+        "opposite hashes have distance 64");
 }
 
-void test_exact_duplicates() {
+void test_cosine_similarity() {
+    const std::vector<float> horizontal{1.0f, 0.0f};
+    const std::vector<float> vertical{0.0f, 1.0f};
+    expect(
+        std::abs(edgegallery::cosine_similarity(horizontal, horizontal) - 1.0f) < 1e-6f,
+        "identical vectors have similarity 1.0");
+    expect(
+        std::abs(edgegallery::cosine_similarity(horizontal, vertical)) < 1e-6f,
+        "orthogonal vectors have similarity 0.0");
+    expect(
+        edgegallery::cosine_similarity({}, horizontal) == 0.0f,
+        "empty vectors have similarity 0.0");
+}
+
+void test_exact_groups_remain_visible_with_a_semantic_neighbour() {
     const std::vector<ImageFingerprint> images{
-        {"a", "sha-a", {1.0f, 0.0f, 0.0f}},
-        {"b", "sha-a", {0.0f, 1.0f, 0.0f}},
-        {"c", "sha-c", {0.0f, 0.0f, 1.0f}},
+        {"original", "same-sha", 0x0000, true, {1.0f, 0.0f}},
+        {"copy", "same-sha", 0x0000, true, {1.0f, 0.0f}},
+        {"similar", "other-sha", 0xFFFF, true, {0.95f, 0.05f}},
     };
 
     ClusterOptions options;
+    options.hamming_threshold = 0;
+    options.similarity_threshold = 0.90f;
+    const auto groups = edgegallery::cluster_duplicates(images, options);
+
+    expect(groups.size() == 2, "exact and semantic relationships are both returned");
+    expect(groups[0].kind == DuplicateKind::Exact, "the exact group keeps its label");
+    expect(
+        groups[0].member_ids == std::vector<std::string>({"original", "copy"}),
+        "the exact group contains both byte-identical files");
+    expect(groups[1].kind == DuplicateKind::VisuallySimilar, "semantic group is separate");
+    expect(
+        groups[1].member_ids == std::vector<std::string>({"original", "similar"}),
+        "only one exact representative appears in the semantic group");
+}
+
+void test_dhash_finds_near_duplicates() {
+    const std::vector<ImageFingerprint> images{
+        {"original", "one", 0b0000, true, {1.0f, 0.0f}},
+        {"resized", "two", 0b0011, true, {0.0f, 1.0f}},
+        {"unrelated", "three", 0xFFFF, true, {0.0f, 0.0f}},
+    };
+
+    ClusterOptions options;
+    options.hamming_threshold = 2;
     options.similarity_threshold = 0.99f;
     const auto groups = edgegallery::cluster_duplicates(images, options);
 
-    expect(groups.size() == 1, "one exact duplicate group is returned");
-    expect(groups[0].kind == DuplicateKind::Exact, "exact group is labelled correctly");
-    expect(groups[0].member_ids == std::vector<std::string>({"a", "b"}), "exact members are stable");
+    expect(groups.size() == 1, "dHash produces one near-duplicate group");
+    expect(
+        groups[0].member_ids == std::vector<std::string>({"original", "resized"}),
+        "the resized image is grouped with its original");
 }
 
-void test_visual_similarity_and_transitive_grouping() {
-    // Embeddings chosen so that adjacent pairs have high cosine similarity
-    // but the first and third are only transitively connected.
+void test_complete_link_prevents_similarity_chaining() {
     const std::vector<ImageFingerprint> images{
-        {"first",     "one",   {1.0f, 0.0f, 0.0f, 0.0f}},
-        {"second",    "two",   {0.9f, 0.4f, 0.0f, 0.0f}},
-        {"third",     "three", {0.7f, 0.7f, 0.0f, 0.0f}},
-        {"unrelated", "four",  {0.0f, 0.0f, 0.0f, 1.0f}},
+        {"first", "one", 0, false, {1.0f, 0.0f}},
+        {"second", "two", 0, false, {0.9f, 0.4f}},
+        {"third", "three", 0, false, {0.7f, 0.7f}},
+        {"unrelated", "four", 0, false, {0.0f, 1.0f}},
     };
 
     ClusterOptions options;
     options.similarity_threshold = 0.80f;
     const auto groups = edgegallery::cluster_duplicates(images, options);
 
-    expect(groups.size() == 1, "transitive visual matches form one group");
-    expect(groups[0].kind == DuplicateKind::VisuallySimilar, "visual group is labelled correctly");
+    expect(groups.size() == 1, "only a mutually similar group is returned");
     expect(
-        groups[0].member_ids == std::vector<std::string>({"first", "second", "third"}),
-        "DSU preserves input order inside a group");
+        groups[0].member_ids == std::vector<std::string>({"first", "second"}),
+        "a transitive third image is not pulled into the group");
 }
 
 void test_missing_features_and_singletons() {
     const std::vector<ImageFingerprint> images{
-        {"unknown", "",           {}},
-        {"known",   "known-hash", {1.0f, 0.0f}},
+        {"unknown", "", 0, false, {}},
+        {"known", "known-hash", 42, true, {1.0f, 0.0f}},
     };
 
     expect(edgegallery::cluster_duplicates(images).empty(), "singletons are hidden by default");
@@ -110,24 +127,29 @@ void test_missing_features_and_singletons() {
     ClusterOptions options;
     options.include_singletons = true;
     const auto groups = edgegallery::cluster_duplicates(images, options);
-    expect(groups.size() == 2, "singletons can be requested");
-    expect(groups[0].member_ids[0] == "unknown", "singleton output is deterministic");
+    expect(groups.size() == 2, "representative singletons can be requested");
+    expect(groups[0].member_ids[0] == "unknown", "singleton order is deterministic");
 }
 
 void test_validation() {
     expect_invalid_argument(
-        [] { edgegallery::cluster_duplicates({{""  , "hash", {1.0f}}}); },
+        [] { edgegallery::cluster_duplicates({{"", "hash", 0, true, {1.0f}}}); },
         "empty ids are rejected");
     expect_invalid_argument(
-        [] { edgegallery::cluster_duplicates({{"same", "a", {1.0f}}, {"same", "b", {0.0f}}}); },
+        [] {
+            edgegallery::cluster_duplicates({
+                {"same", "a", 0, true, {1.0f}},
+                {"same", "b", 1, true, {0.0f}},
+            });
+        },
         "duplicate ids are rejected");
     expect_invalid_argument(
         [] {
             ClusterOptions options;
-            options.similarity_threshold = 1.5f;
+            options.hamming_threshold = 65;
             edgegallery::cluster_duplicates({}, options);
         },
-        "invalid similarity thresholds are rejected");
+        "invalid Hamming thresholds are rejected");
     expect_invalid_argument(
         [] {
             ClusterOptions options;
@@ -135,14 +157,31 @@ void test_validation() {
             edgegallery::cluster_duplicates({}, options);
         },
         "negative similarity thresholds are rejected");
+    expect_invalid_argument(
+        [] {
+            ClusterOptions options;
+            options.similarity_threshold = std::numeric_limits<float>::quiet_NaN();
+            edgegallery::cluster_duplicates({}, options);
+        },
+        "NaN similarity thresholds are rejected");
+    expect_invalid_argument(
+        [] {
+            edgegallery::cluster_duplicates({
+                {"one", "a", 0, true, {1.0f}},
+                {"two", "b", 1, true, {1.0f, 0.0f}},
+            });
+        },
+        "mismatched embedding dimensions are rejected");
 }
 
 }  // namespace
 
 int main() {
+    test_hamming_distance();
     test_cosine_similarity();
-    test_exact_duplicates();
-    test_visual_similarity_and_transitive_grouping();
+    test_exact_groups_remain_visible_with_a_semantic_neighbour();
+    test_dhash_finds_near_duplicates();
+    test_complete_link_prevents_similarity_chaining();
     test_missing_features_and_singletons();
     test_validation();
 

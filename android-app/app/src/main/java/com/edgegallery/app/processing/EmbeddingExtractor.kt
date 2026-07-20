@@ -6,6 +6,7 @@ import java.io.Closeable
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 
 /**
@@ -16,13 +17,17 @@ import org.tensorflow.lite.Interpreter
  */
 class EmbeddingExtractor(context: Context) : Closeable {
 
+    private val modelBuffer: ByteBuffer
     private val interpreter: Interpreter
     private val inputWidth: Int
     private val inputHeight: Int
     private val embeddingDimension: Int
+    private val inputBuffer: ByteBuffer
+    private val inputPixels: IntArray
+    private val outputBuffer: Array<FloatArray>
 
     init {
-        val modelBuffer = try {
+        modelBuffer = try {
             context.assets.open(MODEL_FILENAME).use { stream ->
                 val bytes = stream.readBytes()
                 ByteBuffer.allocateDirect(bytes.size).apply {
@@ -42,16 +47,47 @@ class EmbeddingExtractor(context: Context) : Closeable {
         val options = Interpreter.Options().apply {
             setNumThreads(Runtime.getRuntime().availableProcessors().coerceIn(1, 4))
         }
-        interpreter = Interpreter(modelBuffer, options)
+        val createdInterpreter = Interpreter(modelBuffer, options)
 
-        // Auto-detect input shape [1, height, width, 3].
-        val inputShape = interpreter.getInputTensor(0).shape()
-        inputHeight = inputShape[1]
-        inputWidth = inputShape[2]
+        try {
+            val inputTensor = createdInterpreter.getInputTensor(0)
+            val inputShape = inputTensor.shape()
+            require(inputTensor.dataType() == DataType.FLOAT32) {
+                "MobileNet input must be FLOAT32, but was ${inputTensor.dataType()}"
+            }
+            require(
+                inputShape.size == 4 &&
+                    inputShape[0] == 1 &&
+                    inputShape[1] > 0 &&
+                    inputShape[2] > 0 &&
+                    inputShape[3] == CHANNELS
+            ) {
+                "MobileNet input must have shape [1, height, width, 3]"
+            }
 
-        // Auto-detect output embedding dimension [1, D].
-        val outputShape = interpreter.getOutputTensor(0).shape()
-        embeddingDimension = outputShape[1]
+            val outputTensor = createdInterpreter.getOutputTensor(0)
+            val outputShape = outputTensor.shape()
+            require(outputTensor.dataType() == DataType.FLOAT32) {
+                "MobileNet output must be FLOAT32, but was ${outputTensor.dataType()}"
+            }
+            require(outputShape.size == 2 && outputShape[0] == 1 && outputShape[1] > 0) {
+                "MobileNet output must have shape [1, embedding dimension]"
+            }
+
+            inputHeight = inputShape[1]
+            inputWidth = inputShape[2]
+            embeddingDimension = outputShape[1]
+        } catch (error: Exception) {
+            createdInterpreter.close()
+            throw IllegalStateException("The bundled MobileNet model is incompatible", error)
+        }
+
+        interpreter = createdInterpreter
+        inputBuffer = ByteBuffer.allocateDirect(
+            inputHeight * inputWidth * CHANNELS * FLOAT_BYTES,
+        ).apply { order(ByteOrder.nativeOrder()) }
+        inputPixels = IntArray(inputWidth * inputHeight)
+        outputBuffer = Array(1) { FloatArray(embeddingDimension) }
     }
 
     /** Returns the size of the embedding vector produced by the model. */
@@ -63,6 +99,7 @@ class EmbeddingExtractor(context: Context) : Closeable {
      * The bitmap is scaled to the model's expected input size and normalised
      * to the \[0, 1\] range. The caller is responsible for recycling the bitmap.
      */
+    @Synchronized
     fun extract(bitmap: Bitmap): FloatArray {
         val scaled = if (bitmap.width == inputWidth && bitmap.height == inputHeight) {
             bitmap
@@ -71,12 +108,11 @@ class EmbeddingExtractor(context: Context) : Closeable {
         }
 
         try {
-            val inputBuffer = bitmapToByteBuffer(scaled)
-            val outputBuffer = Array(1) { FloatArray(embeddingDimension) }
-
+            bitmapToByteBuffer(scaled)
+            outputBuffer[0].fill(0.0f)
             interpreter.run(inputBuffer, outputBuffer)
 
-            return outputBuffer[0]
+            return normalise(outputBuffer[0])
         } finally {
             if (scaled !== bitmap) scaled.recycle()
         }
@@ -90,24 +126,36 @@ class EmbeddingExtractor(context: Context) : Closeable {
      * Converts an ARGB bitmap into a direct [ByteBuffer] of RGB floats
      * normalised to \[0, 1\] as expected by MobileNet models.
      */
-    private fun bitmapToByteBuffer(bitmap: Bitmap): ByteBuffer {
-        val bufferSize = 1 * inputHeight * inputWidth * CHANNELS * FLOAT_BYTES
-        val buffer = ByteBuffer.allocateDirect(bufferSize).apply {
-            order(ByteOrder.nativeOrder())
-        }
+    private fun bitmapToByteBuffer(bitmap: Bitmap) {
+        inputBuffer.clear()
+        bitmap.getPixels(inputPixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
 
-        val pixels = IntArray(inputWidth * inputHeight)
-        bitmap.getPixels(pixels, 0, inputWidth, 0, 0, inputWidth, inputHeight)
-
-        for (pixel in pixels) {
+        for (pixel in inputPixels) {
             // Extract RGB channels and normalise from [0, 255] to [0.0, 1.0].
-            buffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
-            buffer.putFloat(((pixel shr 8) and 0xFF) / 255.0f)
-            buffer.putFloat((pixel and 0xFF) / 255.0f)
+            inputBuffer.putFloat(((pixel shr 16) and 0xFF) / 255.0f)
+            inputBuffer.putFloat(((pixel shr 8) and 0xFF) / 255.0f)
+            inputBuffer.putFloat((pixel and 0xFF) / 255.0f)
         }
 
-        buffer.rewind()
-        return buffer
+        inputBuffer.rewind()
+    }
+
+    /** Returns an owned, unit-length copy suitable for cosine comparison. */
+    private fun normalise(values: FloatArray): FloatArray {
+        var squaredMagnitude = 0.0
+        for (value in values) {
+            require(value.isFinite()) { "MobileNet produced a non-finite embedding" }
+            squaredMagnitude += value.toDouble() * value.toDouble()
+        }
+
+        val result = values.copyOf()
+        if (squaredMagnitude == 0.0) return result
+
+        val magnitude = kotlin.math.sqrt(squaredMagnitude).toFloat()
+        for (index in result.indices) {
+            result[index] /= magnitude
+        }
+        return result
     }
 
     private companion object {

@@ -10,16 +10,20 @@ import com.edgegallery.app.model.ScanUiState
 import com.edgegallery.app.nativebridge.NativeEngine
 import com.edgegallery.app.processing.EmbeddingExtractor
 import com.edgegallery.app.processing.ImageProcessor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Coordinates selection, sequential image analysis, native grouping and UI state. */
 class EdgeGalleryViewModel(application: Application) : AndroidViewModel(application) {
-    private val embeddingExtractor = EmbeddingExtractor(application)
-    private val imageProcessor = ImageProcessor(application.contentResolver, embeddingExtractor)
+    private val embeddingExtractor = lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        EmbeddingExtractor(application)
+    }
     private val mutableUiState = MutableStateFlow<ScanUiState>(ScanUiState.Ready())
     private var scanJob: Job? = null
 
@@ -41,10 +45,30 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
 
             mutableUiState.value = ScanUiState.Scanning(processed = 0, total = selectedImages.size)
 
+            val imageProcessor = try {
+                // Model loading can perform file I/O and native initialization,
+                // so keep it away from initial screen creation and the main thread.
+                withContext(Dispatchers.IO) {
+                    ImageProcessor(
+                        getApplication<Application>().contentResolver,
+                        embeddingExtractor.value,
+                    )
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                mutableUiState.value = ScanUiState.Failed(
+                    error.message ?: "The on-device similarity model could not be loaded",
+                )
+                return@launch
+            }
+
             // Sequential decoding keeps memory predictable for this first MVP.
             selectedImages.forEachIndexed { index, uri ->
                 try {
                     features += imageProcessor.analyze(uri)
+                } catch (error: CancellationException) {
+                    throw error
                 } catch (error: Exception) {
                     issues += ScanIssue(
                         imageName = uri.lastPathSegment ?: "Selected image",
@@ -65,6 +89,8 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
                     groups = groups,
                     issues = issues,
                 )
+            } catch (error: CancellationException) {
+                throw error
             } catch (error: Exception) {
                 mutableUiState.value = ScanUiState.Failed(
                     error.message ?: "Native duplicate grouping failed",
@@ -79,6 +105,8 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun onCleared() {
         super.onCleared()
-        embeddingExtractor.close()
+        if (embeddingExtractor.isInitialized()) {
+            embeddingExtractor.value.close()
+        }
     }
 }

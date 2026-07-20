@@ -8,6 +8,7 @@ data class ImageFeatures(
     val uri: Uri,
     val displayName: String,
     val sha256: String,
+    val differenceHash: Long,
     val embedding: FloatArray,
     val exposure: ExposureResult,
 ) {
@@ -18,6 +19,7 @@ data class ImageFeatures(
             uri == other.uri &&
             displayName == other.displayName &&
             sha256 == other.sha256 &&
+            differenceHash == other.differenceHash &&
             embedding.contentEquals(other.embedding) &&
             exposure == other.exposure
     }
@@ -27,6 +29,7 @@ data class ImageFeatures(
         result = 31 * result + uri.hashCode()
         result = 31 * result + displayName.hashCode()
         result = 31 * result + sha256.hashCode()
+        result = 31 * result + differenceHash.hashCode()
         result = 31 * result + embedding.contentHashCode()
         result = 31 * result + exposure.hashCode()
         return result

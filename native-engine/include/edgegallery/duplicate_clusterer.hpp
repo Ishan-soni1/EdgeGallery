@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,8 @@ namespace edgegallery {
 struct ImageFingerprint {
     std::string id;
     std::string content_hash;
+    std::uint64_t perceptual_hash = 0;
+    bool has_perceptual_hash = false;
     std::vector<float> embedding;
 };
 
@@ -25,12 +28,14 @@ struct DuplicateGroup {
 };
 
 struct ClusterOptions {
-    // Higher threshold is more conservative. A good starting point for
-    // MobileNet embeddings is 0.85, but the final value should be selected
-    // using a labelled dataset.
+    std::uint32_t hamming_threshold = 8;
+    // Higher cosine threshold is more conservative. Both thresholds must be
+    // calibrated with a labelled dataset before relying on the grouping.
     float similarity_threshold = 0.85f;
     bool include_singletons = false;
 };
+
+std::uint32_t hamming_distance(std::uint64_t left, std::uint64_t right) noexcept;
 
 // Returns the cosine similarity between two embedding vectors.
 // Both vectors must have the same size. Returns 0.0 if either is empty.

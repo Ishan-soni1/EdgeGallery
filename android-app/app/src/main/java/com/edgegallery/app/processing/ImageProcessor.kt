@@ -22,28 +22,33 @@ class ImageProcessor(
         val displayName = findDisplayName(uri)
         val sha256 = calculateSha256(uri)
 
-        val exposureThumbnail = decodeThumbnail(uri, EXPOSURE_THUMBNAIL_SIZE)
-        val exposureLuminance = try {
-            readLuminance(exposureThumbnail)
-        } finally {
-            exposureThumbnail.recycle()
-        }
+        // Decode once, then derive the smaller dHash and exposure inputs from
+        // the same orientation-corrected bitmap.
+        val thumbnail = decodeThumbnail(uri, EMBEDDING_THUMBNAIL_SIZE)
+        try {
+            val exposureLuminance = readScaledLuminance(
+                thumbnail,
+                EXPOSURE_THUMBNAIL_SIZE,
+                EXPOSURE_THUMBNAIL_SIZE,
+            )
+            val differenceHashLuminance = readScaledLuminance(
+                thumbnail,
+                ImageMath.DIFFERENCE_HASH_WIDTH,
+                ImageMath.DIFFERENCE_HASH_HEIGHT,
+            )
 
-        val embeddingThumbnail = decodeThumbnail(uri, EMBEDDING_THUMBNAIL_SIZE)
-        val embedding = try {
-            embeddingExtractor.extract(embeddingThumbnail)
+            ImageFeatures(
+                id = uri.toString(),
+                uri = uri,
+                displayName = displayName,
+                sha256 = sha256,
+                differenceHash = ImageMath.calculateDifferenceHash(differenceHashLuminance),
+                embedding = embeddingExtractor.extract(thumbnail),
+                exposure = ImageMath.analyzeExposure(exposureLuminance),
+            )
         } finally {
-            embeddingThumbnail.recycle()
+            thumbnail.recycle()
         }
-
-        ImageFeatures(
-            id = uri.toString(),
-            uri = uri,
-            displayName = displayName,
-            sha256 = sha256,
-            embedding = embedding,
-            exposure = ImageMath.analyzeExposure(exposureLuminance),
-        )
     }
 
     /** Streams bytes into SHA-256 instead of loading a complete photo into memory. */
@@ -89,6 +94,15 @@ class ImageProcessor(
             val green = Color.green(pixel)
             val blue = Color.blue(pixel)
             (0.299 * red + 0.587 * green + 0.114 * blue).toInt()
+        }
+    }
+
+    private fun readScaledLuminance(bitmap: Bitmap, width: Int, height: Int): IntArray {
+        val scaled = Bitmap.createScaledBitmap(bitmap, width, height, true)
+        return try {
+            readLuminance(scaled)
+        } finally {
+            if (scaled !== bitmap) scaled.recycle()
         }
     }
 
