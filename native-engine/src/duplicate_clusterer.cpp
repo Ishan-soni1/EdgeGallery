@@ -1,6 +1,8 @@
 #include "edgegallery/duplicate_clusterer.hpp"
-using namespace std ; 
+using namespace std;
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <numeric>
 #include <stdexcept>
 #include <unordered_map>
@@ -60,21 +62,35 @@ bool all_content_hashes_match(
 
 }  // namespace
 
-uint32_t hamming_distance(uint64_t left, uint64_t right) noexcept {
-    uint64_t difference = left ^ right;
-    uint32_t distance = 0;
-    while (difference != 0) {
-        difference &= difference - 1;
-        ++distance;
+float cosine_similarity(const vector<float>& left,
+                        const vector<float>& right) noexcept {
+    if (left.empty() || right.empty() || left.size() != right.size()) {
+        return 0.0f;
     }
-    return distance;
+
+    float dot = 0.0f;
+    float mag_left = 0.0f;
+    float mag_right = 0.0f;
+
+    for (size_t i = 0; i < left.size(); ++i) {
+        dot += left[i] * right[i];
+        mag_left += left[i] * left[i];
+        mag_right += right[i] * right[i];
+    }
+
+    const float denominator = std::sqrt(mag_left) * std::sqrt(mag_right);
+    if (denominator == 0.0f) {
+        return 0.0f;
+    }
+
+    return dot / denominator;
 }
 
 vector<DuplicateGroup> cluster_duplicates(
     const vector<ImageFingerprint>& images,
     const ClusterOptions& options) {
-    if (options.hamming_threshold > 64) {
-        throw invalid_argument("hamming_threshold must be between 0 and 64");
+    if (options.similarity_threshold < 0.0f || options.similarity_threshold > 1.0f) {
+        throw invalid_argument("similarity_threshold must be between 0.0 and 1.0");
     }
 
     std::unordered_set<std::string> ids;
@@ -107,16 +123,16 @@ vector<DuplicateGroup> cluster_duplicates(
     // This intentionally starts with a clear O(n^2) baseline. A metric index
     // should replace it only after profiling shows a meaningful benefit.
     for (size_t left = 0; left < images.size(); ++left) {
-        if (!images[left].has_perceptual_hash) {
+        if (images[left].embedding.empty()) {
             continue;
         }
         for (size_t right = left + 1; right < images.size(); ++right) {
-            if (!images[right].has_perceptual_hash) {
+            if (images[right].embedding.empty()) {
                 continue;
             }
-            if (hamming_distance(
-                    images[left].perceptual_hash,
-                    images[right].perceptual_hash) <= options.hamming_threshold) {
+            if (cosine_similarity(
+                    images[left].embedding,
+                    images[right].embedding) >= options.similarity_threshold) {
                 groups.unite(left, right);
             }
         }

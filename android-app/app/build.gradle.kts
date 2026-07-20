@@ -53,6 +53,12 @@ android {
         }
     }
 
+    // Prevent the build from compressing the TFLite model file, which must be
+    // memory-mapped at runtime.
+    aaptOptions {
+        noCompress += "tflite"
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -70,6 +76,10 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+
+    // TensorFlow Lite for on-device MobileNet embedding inference.
+    implementation("org.tensorflow:tensorflow-lite:2.17.0")
+    implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
 
     testImplementation("junit:junit:4.13.2")
 

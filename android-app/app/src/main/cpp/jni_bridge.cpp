@@ -45,36 +45,24 @@ std::vector<std::string> read_strings(JNIEnv* environment, jobjectArray java_str
     return strings;
 }
 
-std::vector<std::uint64_t> read_hashes(JNIEnv* environment, jlongArray java_hashes) {
-    const jsize count = environment->GetArrayLength(java_hashes);
-    std::vector<jlong> signed_hashes(static_cast<std::size_t>(count));
-    environment->GetLongArrayRegion(java_hashes, 0, count, signed_hashes.data());
-
-    std::vector<std::uint64_t> hashes;
-    hashes.reserve(static_cast<std::size_t>(count));
-    for (jlong hash : signed_hashes) {
-        // The cast preserves all 64 bits even when Kotlin's signed Long is negative.
-        hashes.push_back(static_cast<std::uint64_t>(hash));
-    }
-    return hashes;
-}
-
 std::vector<edgegallery::ImageFingerprint> make_fingerprints(
     const std::vector<std::string>& content_hashes,
-    const std::vector<std::uint64_t>& difference_hashes) {
-    if (content_hashes.size() != difference_hashes.size()) {
-        throw std::invalid_argument("content hash and dHash counts must match");
+    const float* embeddings,
+    int embedding_dimension,
+    int image_count) {
+    if (static_cast<int>(content_hashes.size()) != image_count) {
+        throw std::invalid_argument("content hash count must match image count");
     }
 
     std::vector<edgegallery::ImageFingerprint> fingerprints;
-    fingerprints.reserve(content_hashes.size());
+    fingerprints.reserve(static_cast<std::size_t>(image_count));
 
-    for (std::size_t index = 0; index < content_hashes.size(); ++index) {
+    for (int i = 0; i < image_count; ++i) {
+        const float* start = embeddings + static_cast<std::ptrdiff_t>(i) * embedding_dimension;
         fingerprints.push_back({
-            std::to_string(index),
-            content_hashes[index],
-            difference_hashes[index],
-            true,
+            std::to_string(i),
+            content_hashes[static_cast<std::size_t>(i)],
+            std::vector<float>(start, start + embedding_dimension),
         });
     }
 
@@ -125,19 +113,44 @@ Java_com_edgegallery_app_nativebridge_NativeEngine_clusterNative(
     JNIEnv* environment,
     jobject,
     jobjectArray java_content_hashes,
-    jlongArray java_difference_hashes,
-    jint java_hamming_threshold) {
+    jfloatArray java_embeddings,
+    jint java_embedding_dimension,
+    jint java_image_count,
+    jfloat java_similarity_threshold) {
     try {
-        if (java_hamming_threshold < 0 || java_hamming_threshold > 64) {
-            throw std::invalid_argument("Hamming threshold must be between 0 and 64");
+        if (java_embedding_dimension <= 0) {
+            throw std::invalid_argument("Embedding dimension must be positive");
+        }
+        if (java_image_count <= 0) {
+            throw std::invalid_argument("Image count must be positive");
+        }
+        if (java_similarity_threshold < 0.0f || java_similarity_threshold > 1.0f) {
+            throw std::invalid_argument("Similarity threshold must be between 0.0 and 1.0");
         }
 
         const auto content_hashes = read_strings(environment, java_content_hashes);
-        const auto difference_hashes = read_hashes(environment, java_difference_hashes);
-        const auto fingerprints = make_fingerprints(content_hashes, difference_hashes);
+
+        // Pin the float array for zero-copy access across the JNI boundary.
+        jfloat* embeddings_ptr = environment->GetFloatArrayElements(java_embeddings, nullptr);
+        if (embeddings_ptr == nullptr) {
+            throw std::runtime_error("could not access embedding array");
+        }
+
+        std::vector<edgegallery::ImageFingerprint> fingerprints;
+        try {
+            fingerprints = make_fingerprints(
+                content_hashes,
+                embeddings_ptr,
+                static_cast<int>(java_embedding_dimension),
+                static_cast<int>(java_image_count));
+        } catch (...) {
+            environment->ReleaseFloatArrayElements(java_embeddings, embeddings_ptr, JNI_ABORT);
+            throw;
+        }
+        environment->ReleaseFloatArrayElements(java_embeddings, embeddings_ptr, JNI_ABORT);
 
         edgegallery::ClusterOptions options;
-        options.hamming_threshold = static_cast<std::uint32_t>(java_hamming_threshold);
+        options.similarity_threshold = java_similarity_threshold;
         const auto groups = edgegallery::cluster_duplicates(fingerprints, options);
 
         return make_java_int_array(environment, encode_groups(groups));
