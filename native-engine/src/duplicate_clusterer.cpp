@@ -155,38 +155,48 @@ std::vector<DuplicateGroup> cluster_duplicates(
         }
     }
 
-    const auto visually_matches = [&](std::size_t left, std::size_t right) {
-        const bool near_duplicate =
+    const auto modified_copy_matches = [&](std::size_t left, std::size_t right) {
+        return
             images[left].has_perceptual_hash &&
             images[right].has_perceptual_hash &&
             hamming_distance(
                 images[left].perceptual_hash,
                 images[right].perceptual_hash) <= options.hamming_threshold;
-
-        const bool semantic_match =
+    };
+    const auto related_photo_matches = [&](std::size_t left, std::size_t right) {
+        return
+            !modified_copy_matches(left, right) &&
             !images[left].embedding.empty() &&
             !images[right].embedding.empty() &&
             cosine_similarity(
                 images[left].embedding,
                 images[right].embedding) >= options.similarity_threshold;
+    };
 
-        return near_duplicate || semantic_match;
+    const auto append_groups = [&](
+        const std::vector<std::vector<std::size_t>>& groups,
+        DuplicateKind kind) {
+        for (const auto& members : groups) {
+            if (!options.include_singletons && members.size() < 2) {
+                continue;
+            }
+            DuplicateGroup group{kind, {}};
+            group.member_ids.reserve(members.size());
+            for (const std::size_t index : members) {
+                group.member_ids.push_back(images[index].id);
+            }
+            result.push_back(std::move(group));
+        }
     };
 
     // Complete-link grouping requires a new image to match every existing
     // member. This prevents A~B and B~C from grouping A with an unrelated C.
-    const auto visual_groups = build_complete_link_groups(representatives, visually_matches);
-    for (const auto& members : visual_groups) {
-        if (!options.include_singletons && members.size() < 2) {
-            continue;
-        }
-        DuplicateGroup group{DuplicateKind::VisuallySimilar, {}};
-        group.member_ids.reserve(members.size());
-        for (const std::size_t index : members) {
-            group.member_ids.push_back(images[index].id);
-        }
-        result.push_back(std::move(group));
-    }
+    append_groups(
+        build_complete_link_groups(representatives, modified_copy_matches),
+        DuplicateKind::ModifiedCopy);
+    append_groups(
+        build_complete_link_groups(representatives, related_photo_matches),
+        DuplicateKind::Related);
 
     return result;
 }

@@ -1,9 +1,9 @@
 # EdgeGallery
 
 EdgeGallery is a readable, privacy-first Android MVP that analyses photos chosen
-through the system Photo Picker. It reports exact duplicates, visually similar
-groups and simple exposure warnings. It does not upload, recommend or delete
-photos.
+through the system Photo Picker. It reports exact duplicates, modified copies,
+related-photo groups and simple exposure warnings. It does not upload,
+recommend or delete photos.
 
 ## What works
 
@@ -13,14 +13,15 @@ photos.
 - Bundled MobileNet V3 Small feature-vector model for on-device semantic similarity.
 - Simple underexposure/overexposure warnings from a 64x64 thumbnail.
 - JNI bridge from Kotlin to the C++17 engine.
-- Brute-force dHash and cosine comparisons with complete-link grouping in C++.
+- Separate dHash modified-copy and MobileNet related-photo grouping in C++.
+- Numbered result groups with photo previews and readable comparison scores.
 - Native, Kotlin and on-device model tests plus GitHub Actions workflows.
 
 ## Data flow
 
 ```text
 Photo Picker -> ImageProcessor -> SHA-256/dHash/exposure/MobileNet embedding
-             -> JNI -> C++ exact and complete-link visual grouping
+             -> JNI -> C++ exact, modified-copy and related-photo grouping
              -> ViewModel -> Compose results
 ```
 
@@ -71,9 +72,9 @@ unrelated image, two different photos of the same subject, a dark image and a
 bright image. Confirm that the app shows:
 
 - the original and exact copy in an exact group;
-- the resized/recompressed copy in a visually similar group when its dHash is
+- the resized/recompressed copy in a modified-copy group when its dHash is
   within the configured threshold;
-- the two photos of the same subject in a visually similar group when their
+- the two photos of the same subject in a related-photo group when their
   MobileNet cosine similarity is above the configured threshold;
 - the dark and bright images under exposure warnings;
 - no unrelated image in a duplicate group.

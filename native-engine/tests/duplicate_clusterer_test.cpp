@@ -74,7 +74,7 @@ void test_exact_groups_remain_visible_with_a_semantic_neighbour() {
     expect(
         groups[0].member_ids == std::vector<std::string>({"original", "copy"}),
         "the exact group contains both byte-identical files");
-    expect(groups[1].kind == DuplicateKind::VisuallySimilar, "semantic group is separate");
+    expect(groups[1].kind == DuplicateKind::Related, "semantic group is separate");
     expect(
         groups[1].member_ids == std::vector<std::string>({"original", "similar"}),
         "only one exact representative appears in the semantic group");
@@ -94,6 +94,9 @@ void test_dhash_finds_near_duplicates() {
 
     expect(groups.size() == 1, "dHash produces one near-duplicate group");
     expect(
+        groups[0].kind == DuplicateKind::ModifiedCopy,
+        "dHash evidence is labelled as a modified copy");
+    expect(
         groups[0].member_ids == std::vector<std::string>({"original", "resized"}),
         "the resized image is grouped with its original");
 }
@@ -112,6 +115,9 @@ void test_complete_link_prevents_similarity_chaining() {
 
     expect(groups.size() == 1, "only a mutually similar group is returned");
     expect(
+        groups[0].kind == DuplicateKind::Related,
+        "embedding evidence is labelled as related photos");
+    expect(
         groups[0].member_ids == std::vector<std::string>({"first", "second"}),
         "a transitive third image is not pulled into the group");
 }
@@ -127,8 +133,25 @@ void test_missing_features_and_singletons() {
     ClusterOptions options;
     options.include_singletons = true;
     const auto groups = edgegallery::cluster_duplicates(images, options);
-    expect(groups.size() == 2, "representative singletons can be requested");
+    expect(groups.size() == 4, "singletons are returned once for each visual category");
     expect(groups[0].member_ids[0] == "unknown", "singleton order is deterministic");
+}
+
+void test_modified_copies_are_not_repeated_as_related_photos() {
+    const std::vector<ImageFingerprint> images{
+        {"original", "one", 0b0000, true, {1.0f, 0.0f}},
+        {"resized", "two", 0b0001, true, {1.0f, 0.0f}},
+    };
+
+    ClusterOptions options;
+    options.hamming_threshold = 1;
+    options.similarity_threshold = 0.90f;
+    const auto groups = edgegallery::cluster_duplicates(images, options);
+
+    expect(groups.size() == 1, "a modified-copy pair is returned only once");
+    expect(
+        groups[0].kind == DuplicateKind::ModifiedCopy,
+        "dHash takes precedence over semantic similarity for the same pair");
 }
 
 void test_validation() {
@@ -183,6 +206,7 @@ int main() {
     test_dhash_finds_near_duplicates();
     test_complete_link_prevents_similarity_chaining();
     test_missing_features_and_singletons();
+    test_modified_copies_are_not_repeated_as_related_photos();
     test_validation();
 
     if (failures != 0) {

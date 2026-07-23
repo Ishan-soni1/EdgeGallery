@@ -12,7 +12,8 @@
 namespace {
 
 constexpr jint kExactGroup = 0;
-constexpr jint kVisuallySimilarGroup = 1;
+constexpr jint kModifiedCopyGroup = 1;
+constexpr jint kRelatedGroup = 2;
 
 void throw_java_exception(JNIEnv* environment, const char* class_name, const char* message) {
     jclass exception_class = environment->FindClass(class_name);
@@ -100,9 +101,18 @@ std::vector<jint> encode_groups(const std::vector<edgegallery::DuplicateGroup>& 
     std::vector<jint> encoded;
 
     for (const auto& group : groups) {
-        const jint type = group.kind == edgegallery::DuplicateKind::Exact
-            ? kExactGroup
-            : kVisuallySimilarGroup;
+        jint type = kExactGroup;
+        switch (group.kind) {
+            case edgegallery::DuplicateKind::Exact:
+                type = kExactGroup;
+                break;
+            case edgegallery::DuplicateKind::ModifiedCopy:
+                type = kModifiedCopyGroup;
+                break;
+            case edgegallery::DuplicateKind::Related:
+                type = kRelatedGroup;
+                break;
+        }
 
         encoded.push_back(type);
         encoded.push_back(static_cast<jint>(group.member_ids.size()));

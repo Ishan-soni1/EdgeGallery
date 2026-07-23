@@ -19,7 +19,8 @@ struct ImageFingerprint {
 
 enum class DuplicateKind {
     Exact,
-    VisuallySimilar,
+    ModifiedCopy,
+    Related,
 };
 
 struct DuplicateGroup {
@@ -42,9 +43,9 @@ std::uint32_t hamming_distance(std::uint64_t left, std::uint64_t right) noexcept
 float cosine_similarity(const std::vector<float>& left,
                         const std::vector<float>& right) noexcept;
 
-// Groups exact matches first, then joins visually similar images using a
-// Disjoint Set Union. Output order follows the first appearance in the input,
-// which keeps results stable for the UI and tests.
+// Groups exact matches first, then reports dHash-based modified copies and
+// embedding-based related photos separately. Output order follows the first
+// appearance in the input, which keeps results stable for the UI and tests.
 //
 // Throws std::invalid_argument for an empty/duplicate id or an invalid threshold.
 std::vector<DuplicateGroup> cluster_duplicates(

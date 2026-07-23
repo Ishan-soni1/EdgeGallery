@@ -52,12 +52,23 @@ data class ExposureResult(
 
 enum class DuplicateType {
     EXACT,
-    VISUALLY_SIMILAR,
+    MODIFIED_COPY,
+    RELATED,
 }
+
+/** Readable evidence for one pair inside a result group. */
+data class ImageComparison(
+    val leftId: String,
+    val rightId: String,
+    val exactMatch: Boolean,
+    val hammingDistance: Int,
+    val cosineSimilarity: Float,
+)
 
 data class DuplicateGroup(
     val type: DuplicateType,
     val memberIds: List<String>,
+    val comparisons: List<ImageComparison> = emptyList(),
 )
 
 data class ScanIssue(
@@ -74,6 +85,7 @@ sealed interface ScanUiState {
     data class Completed(
         val features: List<ImageFeatures>,
         val groups: List<DuplicateGroup>,
+        val comparisons: List<ImageComparison>,
         val issues: List<ScanIssue>,
     ) : ScanUiState
 

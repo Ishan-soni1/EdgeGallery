@@ -10,6 +10,7 @@ import com.edgegallery.app.model.ScanUiState
 import com.edgegallery.app.nativebridge.NativeEngine
 import com.edgegallery.app.processing.EmbeddingExtractor
 import com.edgegallery.app.processing.ImageProcessor
+import com.edgegallery.app.processing.SimilarityMath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -87,6 +88,7 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
                 mutableUiState.value = ScanUiState.Completed(
                     features = features,
                     groups = groups,
+                    comparisons = SimilarityMath.comparisonsFor(features),
                     issues = issues,
                 )
             } catch (error: CancellationException) {

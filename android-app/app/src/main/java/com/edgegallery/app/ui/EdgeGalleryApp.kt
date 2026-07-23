@@ -1,12 +1,19 @@
 package com.edgegallery.app.ui
 
+import android.content.ContentResolver
+import android.graphics.ImageDecoder
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -14,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -24,27 +32,44 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.edgegallery.app.EdgeGalleryViewModel
 import com.edgegallery.app.model.DuplicateGroup
 import com.edgegallery.app.model.DuplicateType
 import com.edgegallery.app.model.ExposureClass
+import com.edgegallery.app.model.ImageComparison
 import com.edgegallery.app.model.ImageFeatures
 import com.edgegallery.app.model.ScanIssue
 import com.edgegallery.app.model.ScanUiState
+import com.edgegallery.app.nativebridge.NativeEngine
 import java.util.Locale
+import kotlin.math.roundToInt
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private val LightColors = lightColorScheme(
     primary = Color(0xFF255EA8),
@@ -70,8 +95,6 @@ fun EdgeGalleryTheme(content: @Composable () -> Unit) {
 @Composable
 fun EdgeGalleryApp(viewModel: EdgeGalleryViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
-
-    // Android owns the picker UI and grants access only to these selected images.
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(MAX_SELECTED_IMAGES),
         onResult = viewModel::selectImages,
@@ -135,7 +158,7 @@ private fun ReadyScreen(
         verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
         Text(
-            text = "Find exact copies, visually similar photos, and simple exposure warnings.",
+            text = "Find exact duplicates, modified copies, related photos, and exposure warnings.",
             style = MaterialTheme.typography.headlineSmall,
             fontWeight = FontWeight.Bold,
         )
@@ -170,7 +193,7 @@ private fun ReadyScreen(
         }
 
         Text(
-            text = "MVP limits: results are not cached, no keeper is recommended, and nothing is deleted.",
+            text = "Results are suggestions only. The app never recommends a keeper or deletes a photo.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -205,9 +228,22 @@ private fun ResultsScreen(
 ) {
     val featuresById = state.features.associateBy(ImageFeatures::id)
     val exactGroups = state.groups.filter { it.type == DuplicateType.EXACT }
-    val similarGroups = state.groups.filter { it.type == DuplicateType.VISUALLY_SIMILAR }
+    val modifiedGroups = state.groups.filter { it.type == DuplicateType.MODIFIED_COPY }
+    val relatedGroups = state.groups.filter { it.type == DuplicateType.RELATED }
     val exposureWarnings = state.features.filter {
         it.exposure.classification != ExposureClass.NORMAL
+    }
+    val groupedPairs = remember(state.groups) {
+        state.groups
+            .flatMap(DuplicateGroup::comparisons)
+            .map { comparisonKey(it.leftId, it.rightId) }
+            .toSet()
+    }
+    val closestUnmatched = remember(state.comparisons, groupedPairs) {
+        state.comparisons
+            .filterNot { it.exactMatch || comparisonKey(it.leftId, it.rightId) in groupedPairs }
+            .sortedByDescending(ImageComparison::cosineSimilarity)
+            .take(MAX_UNMATCHED_COMPARISONS)
     }
 
     LazyColumn(
@@ -226,7 +262,9 @@ private fun ResultsScreen(
         item {
             Text(
                 "${state.features.size} analysed • ${exactGroups.size} exact groups • " +
-                    "${similarGroups.size} similar groups • ${exposureWarnings.size} exposure warnings",
+                    "${modifiedGroups.size} modified-copy groups • " +
+                    "${relatedGroups.size} related groups • " +
+                    "${exposureWarnings.size} exposure warnings",
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
@@ -236,16 +274,54 @@ private fun ResultsScreen(
             item { EmptyResult("No exact duplicates found") }
         } else {
             itemsIndexed(exactGroups) { index, group ->
-                DuplicateGroupCard("Exact group ${index + 1}", group, featuresById)
+                DuplicateGroupCard(
+                    title = "Exact duplicate group ${index + 1}",
+                    description = "These files have identical contents.",
+                    group = group,
+                    featuresById = featuresById,
+                )
             }
         }
 
-        item { ResultSectionTitle("Visually similar") }
-        if (similarGroups.isEmpty()) {
-            item { EmptyResult("No visually similar groups found") }
+        item { ResultSectionTitle("Modified copies") }
+        if (modifiedGroups.isEmpty()) {
+            item { EmptyResult("No resized, recompressed, or lightly edited copies found") }
         } else {
-            itemsIndexed(similarGroups) { index, group ->
-                DuplicateGroupCard("Similar group ${index + 1}", group, featuresById)
+            itemsIndexed(modifiedGroups) { index, group ->
+                DuplicateGroupCard(
+                    title = "Modified copy group ${index + 1}",
+                    description = "These photos passed the dHash near-duplicate check.",
+                    group = group,
+                    featuresById = featuresById,
+                )
+            }
+        }
+
+        item { ResultSectionTitle("Related photos") }
+        if (relatedGroups.isEmpty()) {
+            item { EmptyResult("No related photo groups passed the MobileNet threshold") }
+        } else {
+            itemsIndexed(relatedGroups) { index, group ->
+                DuplicateGroupCard(
+                    title = "Related photo group ${index + 1}",
+                    description = "These photos passed the MobileNet similarity check.",
+                    group = group,
+                    featuresById = featuresById,
+                )
+            }
+        }
+
+        if (closestUnmatched.isNotEmpty()) {
+            item { ResultSectionTitle("Closest unmatched pairs") }
+            item {
+                Text(
+                    "Diagnostic scores for the closest pairs that did not pass either threshold.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            itemsIndexed(closestUnmatched) { _, comparison ->
+                UnmatchedComparisonCard(comparison, featuresById)
             }
         }
 
@@ -274,18 +350,192 @@ private fun ResultsScreen(
 @Composable
 private fun DuplicateGroupCard(
     title: String,
+    description: String,
     group: DuplicateGroup,
+    featuresById: Map<String, ImageFeatures>,
+) {
+    val features = group.memberIds.mapNotNull(featuresById::get)
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            Text(
+                description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            PhotoGrid(features)
+            if (group.type == DuplicateType.EXACT) {
+                Text(
+                    "Evidence: matching SHA-256 file hashes",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            } else {
+                ComparisonEvidence(group, featuresById)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PhotoGrid(features: List<ImageFeatures>) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        features.chunked(PHOTO_COLUMNS).forEach { rowFeatures ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                rowFeatures.forEach { feature ->
+                    PhotoTile(feature, Modifier.weight(1f))
+                }
+                repeat(PHOTO_COLUMNS - rowFeatures.size) {
+                    Spacer(Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PhotoTile(feature: ImageFeatures, modifier: Modifier = Modifier) {
+    val contentResolver = LocalContext.current.contentResolver
+    val thumbnailState by produceState<ThumbnailState>(
+        initialValue = ThumbnailState.Loading,
+        key1 = feature.uri,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            try {
+                ThumbnailState.Loaded(loadThumbnail(contentResolver, feature.uri))
+            } catch (_: Exception) {
+                ThumbnailState.Failed
+            }
+        }
+    }
+
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f),
+            shape = RoundedCornerShape(10.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+        ) {
+            when (val thumbnail = thumbnailState) {
+                ThumbnailState.Loading -> ThumbnailMessage("Loading…")
+                ThumbnailState.Failed -> ThumbnailMessage("Preview unavailable")
+                is ThumbnailState.Loaded -> Image(
+                    bitmap = thumbnail.bitmap,
+                    contentDescription = feature.displayName,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop,
+                )
+            }
+        }
+        Text(
+            text = feature.displayName,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun ThumbnailMessage(message: String) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        Text(
+            message,
+            modifier = Modifier.padding(8.dp),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun ComparisonEvidence(
+    group: DuplicateGroup,
+    featuresById: Map<String, ImageFeatures>,
+) {
+    var expanded by rememberSaveable(group.memberIds.joinToString(separator = "|")) {
+        mutableStateOf(false)
+    }
+    val visibleComparisons = if (expanded) {
+        group.comparisons
+    } else {
+        group.comparisons.take(COLLAPSED_COMPARISON_COUNT)
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Match evidence", style = MaterialTheme.typography.labelLarge)
+        visibleComparisons.forEach { comparison ->
+            ComparisonRow(comparison, group.type, featuresById)
+        }
+        if (group.comparisons.size > COLLAPSED_COMPARISON_COUNT) {
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "Show fewer comparisons" else "Show all comparisons")
+            }
+        }
+    }
+}
+
+@Composable
+private fun ComparisonRow(
+    comparison: ImageComparison,
+    type: DuplicateType,
+    featuresById: Map<String, ImageFeatures>,
+) {
+    val leftName = featuresById[comparison.leftId]?.displayName ?: comparison.leftId
+    val rightName = featuresById[comparison.rightId]?.displayName ?: comparison.rightId
+    val evidence = when (type) {
+        DuplicateType.MODIFIED_COPY ->
+            "dHash ${comparison.hammingDistance}/64 " +
+                "(passes at ≤ ${NativeEngine.DEFAULT_HAMMING_THRESHOLD}) • " +
+                "MobileNet ${formatPercent(comparison.cosineSimilarity)}"
+        DuplicateType.RELATED ->
+            "MobileNet ${formatPercent(comparison.cosineSimilarity)} " +
+                "(passes at ≥ ${formatPercent(NativeEngine.DEFAULT_SIMILARITY_THRESHOLD)}) • " +
+                "dHash ${comparison.hammingDistance}/64"
+        DuplicateType.EXACT -> "Matching SHA-256 file hashes"
+    }
+
+    Column {
+        Text(
+            "$leftName ↔ $rightName",
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+        )
+        Text(
+            evidence,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+@Composable
+private fun UnmatchedComparisonCard(
+    comparison: ImageComparison,
     featuresById: Map<String, ImageFeatures>,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(title, fontWeight = FontWeight.SemiBold)
-            group.memberIds.forEach { id ->
-                Text("• ${featuresById[id]?.displayName ?: id}")
-            }
+            ComparisonRow(comparison, DuplicateType.RELATED, featuresById)
+            Text(
+                "Not grouped: dHash must be ≤ ${NativeEngine.DEFAULT_HAMMING_THRESHOLD} " +
+                    "or MobileNet must be ≥ " +
+                    formatPercent(NativeEngine.DEFAULT_SIMILARITY_THRESHOLD),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error,
+            )
         }
     }
 }
@@ -371,4 +621,34 @@ private fun EmptyResult(message: String) {
 
 private fun formatNumber(value: Double): String = String.format(Locale.US, "%.0f", value)
 
+private fun formatPercent(value: Float): String =
+    String.format(Locale.US, "%.1f%%", value * 100f)
+
+private fun comparisonKey(leftId: String, rightId: String): Pair<String, String> =
+    if (leftId <= rightId) leftId to rightId else rightId to leftId
+
+private fun loadThumbnail(contentResolver: ContentResolver, uri: Uri): ImageBitmap {
+    val source = ImageDecoder.createSource(contentResolver, uri)
+    val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+        decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        val largestSide = maxOf(info.size.width, info.size.height)
+        val scale = minOf(1f, THUMBNAIL_PIXEL_SIZE.toFloat() / largestSide)
+        decoder.setTargetSize(
+            (info.size.width * scale).roundToInt().coerceAtLeast(1),
+            (info.size.height * scale).roundToInt().coerceAtLeast(1),
+        )
+    }
+    return bitmap.asImageBitmap()
+}
+
+private sealed interface ThumbnailState {
+    data object Loading : ThumbnailState
+    data object Failed : ThumbnailState
+    data class Loaded(val bitmap: ImageBitmap) : ThumbnailState
+}
+
 private const val MAX_SELECTED_IMAGES = 100
+private const val MAX_UNMATCHED_COMPARISONS = 10
+private const val COLLAPSED_COMPARISON_COUNT = 3
+private const val PHOTO_COLUMNS = 2
+private const val THUMBNAIL_PIXEL_SIZE = 512

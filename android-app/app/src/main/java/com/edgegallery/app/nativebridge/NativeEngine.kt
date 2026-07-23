@@ -3,11 +3,13 @@ package com.edgegallery.app.nativebridge
 import com.edgegallery.app.model.DuplicateGroup
 import com.edgegallery.app.model.DuplicateType
 import com.edgegallery.app.model.ImageFeatures
+import com.edgegallery.app.processing.SimilarityMath
 
 /** The only Kotlin class that knows how the JNI result is encoded. */
 object NativeEngine {
     private const val EXACT_GROUP = 0
-    private const val VISUALLY_SIMILAR_GROUP = 1
+    private const val MODIFIED_COPY_GROUP = 1
+    private const val RELATED_GROUP = 2
 
     init {
         System.loadLibrary("edgegallery_jni")
@@ -59,6 +61,7 @@ object NativeEngine {
         features: List<ImageFeatures>,
     ): List<DuplicateGroup> {
         val groups = mutableListOf<DuplicateGroup>()
+        val featuresById = features.associateBy(ImageFeatures::id)
         var cursor = 0
 
         while (cursor < encodedGroups.size) {
@@ -78,10 +81,15 @@ object NativeEngine {
 
             val type = when (encodedType) {
                 EXACT_GROUP -> DuplicateType.EXACT
-                VISUALLY_SIMILAR_GROUP -> DuplicateType.VISUALLY_SIMILAR
+                MODIFIED_COPY_GROUP -> DuplicateType.MODIFIED_COPY
+                RELATED_GROUP -> DuplicateType.RELATED
                 else -> error("Native group type is invalid")
             }
-            groups += DuplicateGroup(type = type, memberIds = memberIds)
+            groups += DuplicateGroup(
+                type = type,
+                memberIds = memberIds,
+                comparisons = SimilarityMath.comparisonsFor(memberIds, featuresById),
+            )
         }
 
         return groups
@@ -97,6 +105,6 @@ object NativeEngine {
         similarityThreshold: Float,
     ): IntArray
 
-    private const val DEFAULT_HAMMING_THRESHOLD = 8
-    private const val DEFAULT_SIMILARITY_THRESHOLD = 0.85f
+    const val DEFAULT_HAMMING_THRESHOLD = 8
+    const val DEFAULT_SIMILARITY_THRESHOLD = 0.85f
 }
