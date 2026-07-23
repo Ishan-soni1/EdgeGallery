@@ -22,3 +22,12 @@ target_link_libraries(edgegallery_jni PRIVATE EdgeGallery::engine)
 target_compile_features(edgegallery_jni PRIVATE cxx_std_17)
 
 target_compile_options(edgegallery_jni PRIVATE -Wall -Wextra -Wpedantic)
+
+# NDK r27 needs explicit ELF segment alignment for Android devices that use
+# 16 KB memory pages. NDK r28 and newer apply this alignment by default.
+target_link_options(
+    edgegallery_jni
+    PRIVATE
+        "-Wl,-z,max-page-size=16384"
+        "-Wl,-z,common-page-size=16384"
+)
