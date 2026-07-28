@@ -101,7 +101,7 @@ void test_dhash_finds_near_duplicates() {
         "the resized image is grouped with its original");
 }
 
-void test_complete_link_prevents_similarity_chaining() {
+void test_dsu_connects_transitive_similar_images() {
     const std::vector<ImageFingerprint> images{
         {"first", "one", 0, false, {1.0f, 0.0f}},
         {"second", "two", 0, false, {0.9f, 0.4f}},
@@ -113,13 +113,13 @@ void test_complete_link_prevents_similarity_chaining() {
     options.similarity_threshold = 0.80f;
     const auto groups = edgegallery::cluster_duplicates(images, options);
 
-    expect(groups.size() == 1, "only a mutually similar group is returned");
+    expect(groups.size() == 1, "only one connected component group is returned");
     expect(
         groups[0].kind == DuplicateKind::Related,
         "embedding evidence is labelled as related photos");
     expect(
-        groups[0].member_ids == std::vector<std::string>({"first", "second"}),
-        "a transitive third image is not pulled into the group");
+        groups[0].member_ids == std::vector<std::string>({"first", "second", "third"}),
+        "transitive similar images are grouped together via DSU");
 }
 
 void test_missing_features_and_singletons() {
@@ -204,7 +204,7 @@ int main() {
     test_cosine_similarity();
     test_exact_groups_remain_visible_with_a_semantic_neighbour();
     test_dhash_finds_near_duplicates();
-    test_complete_link_prevents_similarity_chaining();
+    test_dsu_connects_transitive_similar_images();
     test_missing_features_and_singletons();
     test_modified_copies_are_not_repeated_as_related_photos();
     test_validation();

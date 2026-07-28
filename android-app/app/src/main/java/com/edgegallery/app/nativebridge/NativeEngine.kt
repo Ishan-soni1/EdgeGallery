@@ -27,6 +27,9 @@ object NativeEngine {
 
         val contentHashes = Array(features.size) { index -> features[index].sha256 }
         val differenceHashes = LongArray(features.size) { index -> features[index].differenceHash }
+        val widths = IntArray(features.size) { index -> features[index].imageWidth }
+        val heights = IntArray(features.size) { index -> features[index].imageHeight }
+        val fileSizes = LongArray(features.size) { index -> features[index].fileSize }
 
         // Flatten all embeddings into a single contiguous array for efficient
         // JNI transfer. This avoids N separate object references across the
@@ -47,6 +50,9 @@ object NativeEngine {
             features.size,
             hammingThreshold,
             similarityThreshold,
+            widths,
+            heights,
+            fileSizes,
         )
 
         return decodeGroups(encodedGroups, features)
@@ -103,6 +109,9 @@ object NativeEngine {
         imageCount: Int,
         hammingThreshold: Int,
         similarityThreshold: Float,
+        widths: IntArray,
+        heights: IntArray,
+        fileSizes: LongArray,
     ): IntArray
 
     const val DEFAULT_HAMMING_THRESHOLD = 8

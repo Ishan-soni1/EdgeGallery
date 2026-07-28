@@ -65,7 +65,10 @@ std::vector<edgegallery::ImageFingerprint> make_fingerprints(
     const std::vector<std::uint64_t>& difference_hashes,
     const float* embeddings,
     int embedding_dimension,
-    int image_count) {
+    int image_count,
+    const jint* widths,
+    const jint* heights,
+    const jlong* file_sizes) {
     if (static_cast<int>(content_hashes.size()) != image_count) {
         throw std::invalid_argument("content hash count must match image count");
     }
@@ -78,13 +81,21 @@ std::vector<edgegallery::ImageFingerprint> make_fingerprints(
 
     for (int i = 0; i < image_count; ++i) {
         const float* start = embeddings + static_cast<std::ptrdiff_t>(i) * embedding_dimension;
-        fingerprints.push_back({
-            std::to_string(i),
-            content_hashes[static_cast<std::size_t>(i)],
-            difference_hashes[static_cast<std::size_t>(i)],
-            true,
-            std::vector<float>(start, start + embedding_dimension),
-        });
+        edgegallery::ImageFingerprint fp;
+        fp.id = std::to_string(i);
+        fp.content_hash = content_hashes[static_cast<std::size_t>(i)];
+        fp.perceptual_hash = difference_hashes[static_cast<std::size_t>(i)];
+        fp.has_perceptual_hash = true;
+        fp.embedding = std::vector<float>(start, start + embedding_dimension);
+        // Phase 2: metadata pre-filtering fields.
+        if (widths != nullptr && heights != nullptr) {
+            fp.width = static_cast<int>(widths[i]);
+            fp.height = static_cast<int>(heights[i]);
+        }
+        if (file_sizes != nullptr) {
+            fp.file_size = static_cast<std::int64_t>(file_sizes[i]);
+        }
+        fingerprints.push_back(std::move(fp));
     }
 
     return fingerprints;
@@ -148,7 +159,10 @@ Java_com_edgegallery_app_nativebridge_NativeEngine_clusterNative(
     jint java_embedding_dimension,
     jint java_image_count,
     jint java_hamming_threshold,
-    jfloat java_similarity_threshold) {
+    jfloat java_similarity_threshold,
+    jintArray java_widths,
+    jintArray java_heights,
+    jlongArray java_file_sizes) {
     try {
         if (java_embedding_dimension <= 0) {
             throw std::invalid_argument("Embedding dimension must be positive");
@@ -178,6 +192,21 @@ Java_com_edgegallery_app_nativebridge_NativeEngine_clusterNative(
             throw std::runtime_error("could not access embedding array");
         }
 
+        // Pin metadata arrays.
+        jint* widths_ptr = nullptr;
+        jint* heights_ptr = nullptr;
+        jlong* file_sizes_ptr = nullptr;
+
+        if (java_widths != nullptr) {
+            widths_ptr = environment->GetIntArrayElements(java_widths, nullptr);
+        }
+        if (java_heights != nullptr) {
+            heights_ptr = environment->GetIntArrayElements(java_heights, nullptr);
+        }
+        if (java_file_sizes != nullptr) {
+            file_sizes_ptr = environment->GetLongArrayElements(java_file_sizes, nullptr);
+        }
+
         std::vector<edgegallery::ImageFingerprint> fingerprints;
         try {
             fingerprints = make_fingerprints(
@@ -185,12 +214,21 @@ Java_com_edgegallery_app_nativebridge_NativeEngine_clusterNative(
                 difference_hashes,
                 embeddings_ptr,
                 static_cast<int>(java_embedding_dimension),
-                static_cast<int>(java_image_count));
+                static_cast<int>(java_image_count),
+                widths_ptr,
+                heights_ptr,
+                file_sizes_ptr);
         } catch (...) {
             environment->ReleaseFloatArrayElements(java_embeddings, embeddings_ptr, JNI_ABORT);
+            if (widths_ptr) environment->ReleaseIntArrayElements(java_widths, widths_ptr, JNI_ABORT);
+            if (heights_ptr) environment->ReleaseIntArrayElements(java_heights, heights_ptr, JNI_ABORT);
+            if (file_sizes_ptr) environment->ReleaseLongArrayElements(java_file_sizes, file_sizes_ptr, JNI_ABORT);
             throw;
         }
         environment->ReleaseFloatArrayElements(java_embeddings, embeddings_ptr, JNI_ABORT);
+        if (widths_ptr) environment->ReleaseIntArrayElements(java_widths, widths_ptr, JNI_ABORT);
+        if (heights_ptr) environment->ReleaseIntArrayElements(java_heights, heights_ptr, JNI_ABORT);
+        if (file_sizes_ptr) environment->ReleaseLongArrayElements(java_file_sizes, file_sizes_ptr, JNI_ABORT);
 
         edgegallery::ClusterOptions options;
         options.hamming_threshold = static_cast<std::uint32_t>(java_hamming_threshold);

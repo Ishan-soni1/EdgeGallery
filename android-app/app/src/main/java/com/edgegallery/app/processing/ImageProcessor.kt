@@ -20,6 +20,8 @@ class ImageProcessor(
 
     suspend fun analyze(uri: Uri): ImageFeatures = withContext(Dispatchers.IO) {
         val displayName = findDisplayName(uri)
+        val fileSize = findFileSize(uri)
+        val (imageWidth, imageHeight) = findDimensions(uri)
         val sha256 = calculateSha256(uri)
 
         // Decode once, then derive the smaller dHash and exposure inputs from
@@ -45,6 +47,9 @@ class ImageProcessor(
                 differenceHash = ImageMath.calculateDifferenceHash(differenceHashLuminance),
                 embedding = embeddingExtractor.extract(thumbnail),
                 exposure = ImageMath.analyzeExposure(exposureLuminance),
+                imageWidth = imageWidth,
+                imageHeight = imageHeight,
+                fileSize = fileSize,
             )
         } finally {
             thumbnail.recycle()
@@ -114,6 +119,33 @@ class ImageProcessor(
             }
         }
         return uri.lastPathSegment ?: "Unnamed image"
+    }
+
+    private fun findFileSize(uri: Uri): Long {
+        val columns = arrayOf(OpenableColumns.SIZE)
+        contentResolver.query(uri, columns, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) {
+                    return cursor.getLong(sizeIndex)
+                }
+            }
+        }
+        return 0L
+    }
+
+    private fun findDimensions(uri: Uri): Pair<Int, Int> {
+        return try {
+            val options = android.graphics.BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            contentResolver.openInputStream(uri)?.use { stream ->
+                android.graphics.BitmapFactory.decodeStream(stream, null, options)
+            }
+            Pair(options.outWidth.coerceAtLeast(0), options.outHeight.coerceAtLeast(0))
+        } catch (_: Exception) {
+            Pair(0, 0)
+        }
     }
 
     private companion object {

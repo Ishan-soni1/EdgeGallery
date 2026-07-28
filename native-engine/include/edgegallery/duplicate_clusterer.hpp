@@ -15,6 +15,10 @@ struct ImageFingerprint {
     std::uint64_t perceptual_hash = 0;
     bool has_perceptual_hash = false;
     std::vector<float> embedding;
+    // Metadata for pre-filtering (Phase 2).
+    int width = 0;
+    int height = 0;
+    std::int64_t file_size = 0;
 };
 
 enum class DuplicateKind {

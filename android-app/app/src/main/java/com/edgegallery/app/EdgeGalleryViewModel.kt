@@ -85,10 +85,17 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
 
             try {
                 val groups = NativeEngine.findDuplicateGroups(features)
+                // Compute comparisons only within groups (Phase 3 optimization).
+                // This replaces the old O(n²) all-pairs scan with O(Σ gᵢ²) where
+                // gᵢ is the size of each group — typically much smaller.
+                val featuresById = features.associateBy(ImageFeatures::id)
+                val comparisons = groups.flatMap { group ->
+                    SimilarityMath.comparisonsFor(group.memberIds, featuresById)
+                }
                 mutableUiState.value = ScanUiState.Completed(
                     features = features,
                     groups = groups,
-                    comparisons = SimilarityMath.comparisonsFor(features),
+                    comparisons = comparisons,
                     issues = issues,
                 )
             } catch (error: CancellationException) {

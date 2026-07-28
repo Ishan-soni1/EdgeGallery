@@ -11,6 +11,9 @@ data class ImageFeatures(
     val differenceHash: Long,
     val embedding: FloatArray,
     val exposure: ExposureResult,
+    val imageWidth: Int = 0,
+    val imageHeight: Int = 0,
+    val fileSize: Long = 0L,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -21,7 +24,10 @@ data class ImageFeatures(
             sha256 == other.sha256 &&
             differenceHash == other.differenceHash &&
             embedding.contentEquals(other.embedding) &&
-            exposure == other.exposure
+            exposure == other.exposure &&
+            imageWidth == other.imageWidth &&
+            imageHeight == other.imageHeight &&
+            fileSize == other.fileSize
     }
 
     override fun hashCode(): Int {
@@ -32,6 +38,9 @@ data class ImageFeatures(
         result = 31 * result + differenceHash.hashCode()
         result = 31 * result + embedding.contentHashCode()
         result = 31 * result + exposure.hashCode()
+        result = 31 * result + imageWidth
+        result = 31 * result + imageHeight
+        result = 31 * result + fileSize.hashCode()
         return result
     }
 }
