@@ -1,6 +1,7 @@
 add_library(edgegallery_engine
     src/duplicate_clusterer.cpp
     src/disjoint_set.cpp
+    src/embedding_lsh.cpp
     src/multi_index_hash.cpp
 )
 

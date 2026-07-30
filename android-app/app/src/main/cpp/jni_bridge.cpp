@@ -170,8 +170,8 @@ Java_com_edgegallery_app_nativebridge_NativeEngine_clusterNative(
         if (java_image_count <= 0) {
             throw std::invalid_argument("Image count must be positive");
         }
-        if (java_hamming_threshold < 0 || java_hamming_threshold > 64) {
-            throw std::invalid_argument("Hamming threshold must be between 0 and 64");
+        if (java_hamming_threshold < 0 || java_hamming_threshold > 15) {
+            throw std::invalid_argument("Hamming threshold must be between 0 and 15");
         }
         if (java_similarity_threshold < 0.0f || java_similarity_threshold > 1.0f) {
             throw std::invalid_argument("Similarity threshold must be between 0.0 and 1.0");

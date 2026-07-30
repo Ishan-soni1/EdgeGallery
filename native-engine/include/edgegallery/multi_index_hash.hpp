@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <unordered_map>
 #include <vector>
 
@@ -34,9 +35,12 @@ public:
     /// Inserts an image into the index.
     void insert(std::size_t image_index, std::uint64_t hash);
 
-    /// Returns all image indices whose stored hash has Hamming distance
-    /// ≤ threshold from @p query_hash.  Results are deduplicated.
-    std::vector<std::size_t> query(std::uint64_t query_hash) const;
+    /// Returns image indices whose stored hash has Hamming distance
+    /// ≤ threshold from @p query_hash. Work and results are bounded by
+    /// @p max_checks; results are deduplicated.
+    std::vector<std::size_t> query(
+        std::uint64_t query_hash,
+        std::size_t max_checks = std::numeric_limits<std::size_t>::max()) const;
 
     /// Number of blocks the hash is split into.
     std::uint32_t block_count() const { return block_count_; }

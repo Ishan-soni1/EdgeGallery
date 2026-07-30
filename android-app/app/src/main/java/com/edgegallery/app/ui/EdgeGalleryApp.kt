@@ -4,9 +4,10 @@ import android.content.ContentResolver
 import android.graphics.ImageDecoder
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,10 +24,13 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -96,7 +100,7 @@ fun EdgeGalleryTheme(content: @Composable () -> Unit) {
 fun EdgeGalleryApp(viewModel: EdgeGalleryViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia(MAX_SELECTED_IMAGES),
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
         onResult = viewModel::selectImages,
     )
 
@@ -115,9 +119,7 @@ fun EdgeGalleryApp(viewModel: EdgeGalleryViewModel) {
             is ScanUiState.Ready -> ReadyScreen(
                 selectedCount = state.selectedImages.size,
                 onSelectImages = {
-                    imagePicker.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
+                    imagePicker.launch(arrayOf("image/*"))
                 },
                 onStartScan = viewModel::startScan,
                 modifier = Modifier.padding(contentPadding),
@@ -131,6 +133,7 @@ fun EdgeGalleryApp(viewModel: EdgeGalleryViewModel) {
             is ScanUiState.Completed -> ResultsScreen(
                 state = state,
                 onStartOver = viewModel::reset,
+                onDeletePhotos = viewModel::deletePhotos,
                 modifier = Modifier.padding(contentPadding),
             )
 
@@ -165,7 +168,7 @@ private fun ReadyScreen(
 
         InfoCard(
             title = "Private by design",
-            body = "Your images are analysed on this device. The app has no internet permission and never deletes photos.",
+            body = "Your images are analysed on this device. Nothing is uploaded, and a photo is deleted only after you select and confirm it.",
         )
 
         OutlinedButton(
@@ -193,7 +196,7 @@ private fun ReadyScreen(
         }
 
         Text(
-            text = "Results are suggestions only. The app never recommends a keeper or deletes a photo.",
+            text = "You can review up to 100 selected photos. Always check duplicate suggestions before deletion.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -224,6 +227,7 @@ private fun ScanningScreen(state: ScanUiState.Scanning, modifier: Modifier = Mod
 private fun ResultsScreen(
     state: ScanUiState.Completed,
     onStartOver: () -> Unit,
+    onDeletePhotos: (Set<String>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val featuresById = state.features.associateBy(ImageFeatures::id)
@@ -233,17 +237,42 @@ private fun ResultsScreen(
     val exposureWarnings = state.features.filter {
         it.exposure.classification != ExposureClass.NORMAL
     }
-    val groupedPairs = remember(state.groups) {
-        state.groups
-            .flatMap(DuplicateGroup::comparisons)
-            .map { comparisonKey(it.leftId, it.rightId) }
+    var selectedIds by remember(state.features) { mutableStateOf(emptySet<String>()) }
+    var showDeleteConfirmation by remember { mutableStateOf(false) }
+    val suggestedIds = remember(exactGroups, modifiedGroups) {
+        (exactGroups + modifiedGroups)
+            .flatMap { group -> group.memberIds.drop(1) }
             .toSet()
     }
-    val closestUnmatched = remember(state.comparisons, groupedPairs) {
-        state.comparisons
-            .filterNot { it.exactMatch || comparisonKey(it.leftId, it.rightId) in groupedPairs }
-            .sortedByDescending(ImageComparison::cosineSimilarity)
-            .take(MAX_UNMATCHED_COMPARISONS)
+    val selectedBytes = selectedIds.sumOf { featuresById[it]?.fileSize ?: 0L }
+
+    if (showDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmation = false },
+            title = { Text("Permanently delete selected photos?") },
+            text = {
+                Text(
+                    "${selectedIds.size} photo${if (selectedIds.size == 1) "" else "s"} " +
+                        "will be removed from the device. This cannot be undone.",
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showDeleteConfirmation = false
+                        onDeletePhotos(selectedIds)
+                        selectedIds = emptySet()
+                    },
+                ) {
+                    Text("Delete permanently")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConfirmation = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 
     LazyColumn(
@@ -252,24 +281,39 @@ private fun ResultsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            Text(
-                text = "Scan complete",
-                style = MaterialTheme.typography.headlineSmall,
-                fontWeight = FontWeight.Bold,
+            ResultHero(
+                photoCount = state.features.size,
+                duplicateGroupCount = exactGroups.size + modifiedGroups.size,
+                relatedGroupCount = relatedGroups.size,
+                warningCount = exposureWarnings.size,
             )
         }
 
         item {
-            Text(
-                "${state.features.size} analysed • ${exactGroups.size} exact groups • " +
-                    "${modifiedGroups.size} modified-copy groups • " +
-                    "${relatedGroups.size} related groups • " +
-                    "${exposureWarnings.size} exposure warnings",
-                style = MaterialTheme.typography.bodyMedium,
+            CleanupCard(
+                selectedCount = selectedIds.size,
+                selectedBytes = selectedBytes,
+                suggestedCount = suggestedIds.size,
+                isDeleting = state.isDeleting,
+                onSelectSuggested = { selectedIds = suggestedIds },
+                onClearSelection = { selectedIds = emptySet() },
+                onDelete = { showDeleteConfirmation = true },
             )
         }
 
-        item { ResultSectionTitle("Exact duplicates") }
+        state.actionMessage?.let { message ->
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    ),
+                ) {
+                    Text(message, modifier = Modifier.padding(16.dp))
+                }
+            }
+        }
+
+        item { ResultSectionTitle("Exact duplicates", "Safe place to start") }
         if (exactGroups.isEmpty()) {
             item { EmptyResult("No exact duplicates found") }
         } else {
@@ -279,11 +323,13 @@ private fun ResultsScreen(
                     description = "These files have identical contents.",
                     group = group,
                     featuresById = featuresById,
+                    selectedIds = selectedIds,
+                    onToggleSelection = { id -> selectedIds = selectedIds.toggle(id) },
                 )
             }
         }
 
-        item { ResultSectionTitle("Modified copies") }
+        item { ResultSectionTitle("Modified copies", "Review size and quality before deleting") }
         if (modifiedGroups.isEmpty()) {
             item { EmptyResult("No resized, recompressed, or lightly edited copies found") }
         } else {
@@ -293,39 +339,29 @@ private fun ResultsScreen(
                     description = "These photos passed the dHash near-duplicate check.",
                     group = group,
                     featuresById = featuresById,
+                    selectedIds = selectedIds,
+                    onToggleSelection = { id -> selectedIds = selectedIds.toggle(id) },
                 )
             }
         }
 
-        item { ResultSectionTitle("Related photos") }
+        item { ResultSectionTitle("Related photos", "Similar scene, not necessarily duplicates") }
         if (relatedGroups.isEmpty()) {
             item { EmptyResult("No related photo groups passed the MobileNet threshold") }
         } else {
             itemsIndexed(relatedGroups) { index, group ->
                 DuplicateGroupCard(
                     title = "Related photo group ${index + 1}",
-                    description = "These photos passed the MobileNet similarity check.",
+                    description = "These photos look related. Keep multiple shots when they capture different moments.",
                     group = group,
                     featuresById = featuresById,
+                    selectedIds = selectedIds,
+                    onToggleSelection = { id -> selectedIds = selectedIds.toggle(id) },
                 )
             }
         }
 
-        if (closestUnmatched.isNotEmpty()) {
-            item { ResultSectionTitle("Closest unmatched pairs") }
-            item {
-                Text(
-                    "Diagnostic scores for the closest pairs that did not pass either threshold.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            itemsIndexed(closestUnmatched) { _, comparison ->
-                UnmatchedComparisonCard(comparison, featuresById)
-            }
-        }
-
-        item { ResultSectionTitle("Exposure warnings") }
+        item { ResultSectionTitle("Exposure warnings", "Informational only") }
         if (exposureWarnings.isEmpty()) {
             item { EmptyResult("No exposure warnings found") }
         } else {
@@ -340,7 +376,11 @@ private fun ResultsScreen(
         }
 
         item {
-            Button(onClick = onStartOver, modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = onStartOver,
+                enabled = !state.isDeleting,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text("Start another scan")
             }
         }
@@ -353,6 +393,8 @@ private fun DuplicateGroupCard(
     description: String,
     group: DuplicateGroup,
     featuresById: Map<String, ImageFeatures>,
+    selectedIds: Set<String>,
+    onToggleSelection: (String) -> Unit,
 ) {
     val features = group.memberIds.mapNotNull(featuresById::get)
 
@@ -367,7 +409,11 @@ private fun DuplicateGroupCard(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            PhotoGrid(features)
+            PhotoGrid(
+                features = features,
+                selectedIds = selectedIds,
+                onToggleSelection = onToggleSelection,
+            )
             if (group.type == DuplicateType.EXACT) {
                 Text(
                     "Evidence: matching SHA-256 file hashes",
@@ -382,7 +428,11 @@ private fun DuplicateGroupCard(
 }
 
 @Composable
-private fun PhotoGrid(features: List<ImageFeatures>) {
+private fun PhotoGrid(
+    features: List<ImageFeatures>,
+    selectedIds: Set<String>,
+    onToggleSelection: (String) -> Unit,
+) {
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         features.chunked(PHOTO_COLUMNS).forEach { rowFeatures ->
             Row(
@@ -390,7 +440,12 @@ private fun PhotoGrid(features: List<ImageFeatures>) {
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 rowFeatures.forEach { feature ->
-                    PhotoTile(feature, Modifier.weight(1f))
+                    PhotoTile(
+                        feature = feature,
+                        selected = feature.id in selectedIds,
+                        onToggleSelection = { onToggleSelection(feature.id) },
+                        modifier = Modifier.weight(1f),
+                    )
                 }
                 repeat(PHOTO_COLUMNS - rowFeatures.size) {
                     Spacer(Modifier.weight(1f))
@@ -401,7 +456,12 @@ private fun PhotoGrid(features: List<ImageFeatures>) {
 }
 
 @Composable
-private fun PhotoTile(feature: ImageFeatures, modifier: Modifier = Modifier) {
+private fun PhotoTile(
+    feature: ImageFeatures,
+    selected: Boolean,
+    onToggleSelection: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val contentResolver = LocalContext.current.contentResolver
     val thumbnailState by produceState<ThumbnailState>(
         initialValue = ThumbnailState.Loading,
@@ -420,18 +480,31 @@ private fun PhotoTile(feature: ImageFeatures, modifier: Modifier = Modifier) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(1f),
+                .aspectRatio(1f)
+                .clickable(onClick = onToggleSelection),
             shape = RoundedCornerShape(10.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
+            border = if (selected) {
+                BorderStroke(3.dp, MaterialTheme.colorScheme.primary)
+            } else {
+                null
+            },
         ) {
-            when (val thumbnail = thumbnailState) {
-                ThumbnailState.Loading -> ThumbnailMessage("Loading…")
-                ThumbnailState.Failed -> ThumbnailMessage("Preview unavailable")
-                is ThumbnailState.Loaded -> Image(
-                    bitmap = thumbnail.bitmap,
-                    contentDescription = feature.displayName,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
+            Box {
+                when (val thumbnail = thumbnailState) {
+                    ThumbnailState.Loading -> ThumbnailMessage("Loading…")
+                    ThumbnailState.Failed -> ThumbnailMessage("Preview unavailable")
+                    is ThumbnailState.Loaded -> Image(
+                        bitmap = thumbnail.bitmap,
+                        contentDescription = feature.displayName,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                    )
+                }
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onToggleSelection() },
+                    modifier = Modifier.align(Alignment.TopEnd),
                 )
             }
         }
@@ -441,6 +514,11 @@ private fun PhotoTile(feature: ImageFeatures, modifier: Modifier = Modifier) {
             fontWeight = FontWeight.Medium,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
+        )
+        Text(
+            text = formatBytes(feature.fileSize),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
 }
@@ -519,28 +597,6 @@ private fun ComparisonRow(
 }
 
 @Composable
-private fun UnmatchedComparisonCard(
-    comparison: ImageComparison,
-    featuresById: Map<String, ImageFeatures>,
-) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            ComparisonRow(comparison, DuplicateType.RELATED, featuresById)
-            Text(
-                "Not grouped: dHash must be ≤ ${NativeEngine.DEFAULT_HAMMING_THRESHOLD} " +
-                    "or MobileNet must be ≥ " +
-                    formatPercent(NativeEngine.DEFAULT_SIMILARITY_THRESHOLD),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-    }
-}
-
-@Composable
 private fun ExposureCard(feature: ImageFeatures) {
     val warning = when (feature.exposure.classification) {
         ExposureClass.UNDEREXPOSED -> "Possibly underexposed"
@@ -595,6 +651,108 @@ private fun FailedScreen(
 }
 
 @Composable
+private fun ResultHero(
+    photoCount: Int,
+    duplicateGroupCount: Int,
+    relatedGroupCount: Int,
+    warningCount: Int,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+        ),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Text(
+                text = "Scan complete",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SummaryStat("$photoCount", "analysed", Modifier.weight(1f))
+                SummaryStat("$duplicateGroupCount", "duplicate groups", Modifier.weight(1f))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SummaryStat("$relatedGroupCount", "related groups", Modifier.weight(1f))
+                SummaryStat("$warningCount", "warnings", Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun SummaryStat(value: String, label: String, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(label, style = MaterialTheme.typography.bodySmall)
+    }
+}
+
+@Composable
+private fun CleanupCard(
+    selectedCount: Int,
+    selectedBytes: Long,
+    suggestedCount: Int,
+    isDeleting: Boolean,
+    onSelectSuggested: () -> Unit,
+    onClearSelection: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("Review and clean up", style = MaterialTheme.typography.titleMedium)
+            Text(
+                if (selectedCount == 0) {
+                    "Tap a photo to mark it for deletion. Nothing is selected automatically."
+                } else {
+                    "$selectedCount selected • ${formatBytes(selectedBytes)}"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(
+                    onClick = if (selectedCount == 0) onSelectSuggested else onClearSelection,
+                    enabled = suggestedCount > 0 && !isDeleting,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (selectedCount == 0) "Select suggestions" else "Clear")
+                }
+                FilledTonalButton(
+                    onClick = onDelete,
+                    enabled = selectedCount > 0 && !isDeleting,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (isDeleting) "Deleting…" else "Delete selected")
+                }
+            }
+            if (suggestedCount > 0) {
+                Text(
+                    "Suggestions select every photo after the first in exact and modified-copy groups. Review them before deleting.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun InfoCard(title: String, body: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -605,10 +763,17 @@ private fun InfoCard(title: String, body: String) {
 }
 
 @Composable
-private fun ResultSectionTitle(title: String) {
+private fun ResultSectionTitle(title: String, subtitle: String? = null) {
     Column {
         Spacer(Modifier.height(8.dp))
         Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        if (subtitle != null) {
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         Spacer(Modifier.height(6.dp))
         HorizontalDivider()
     }
@@ -624,8 +789,17 @@ private fun formatNumber(value: Double): String = String.format(Locale.US, "%.0f
 private fun formatPercent(value: Float): String =
     String.format(Locale.US, "%.1f%%", value * 100f)
 
-private fun comparisonKey(leftId: String, rightId: String): Pair<String, String> =
-    if (leftId <= rightId) leftId to rightId else rightId to leftId
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0L -> "Size unavailable"
+    bytes < 1024L -> "$bytes B"
+    bytes < 1024L * 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
+    bytes < 1024L * 1024L * 1024L ->
+        String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    else -> String.format(Locale.US, "%.1f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+}
+
+private fun Set<String>.toggle(id: String): Set<String> =
+    if (id in this) this - id else this + id
 
 private fun loadThumbnail(contentResolver: ContentResolver, uri: Uri): ImageBitmap {
     val source = ImageDecoder.createSource(contentResolver, uri)
@@ -647,8 +821,6 @@ private sealed interface ThumbnailState {
     data class Loaded(val bitmap: ImageBitmap) : ThumbnailState
 }
 
-private const val MAX_SELECTED_IMAGES = 100
-private const val MAX_UNMATCHED_COMPARISONS = 10
 private const val COLLAPSED_COMPARISON_COUNT = 3
 private const val PHOTO_COLUMNS = 2
 private const val THUMBNAIL_PIXEL_SIZE = 512

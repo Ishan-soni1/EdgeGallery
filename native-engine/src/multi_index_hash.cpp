@@ -1,6 +1,11 @@
 #include "edgegallery/multi_index_hash.hpp"
 
+#include <algorithm>
+#if defined(__has_include)
+#if __has_include(<bit>)
 #include <bit>
+#endif
+#endif
 #include <stdexcept>
 #include <unordered_set>
 
@@ -57,9 +62,14 @@ void MultiIndexHash::insert(std::size_t image_index, std::uint64_t hash) {
     }
 }
 
-std::vector<std::size_t> MultiIndexHash::query(std::uint64_t query_hash) const {
+std::vector<std::size_t> MultiIndexHash::query(
+    std::uint64_t query_hash,
+    std::size_t max_checks) const {
+    if (max_checks == 0) return {};
+
     // Collect candidate image indices that share at least one block.
     std::unordered_set<std::size_t> seen;
+    std::size_t checks = 0;
 
     for (std::uint32_t b = 0; b < block_count_; ++b) {
         const std::uint32_t key = extract_block(query_hash, b);
@@ -67,6 +77,13 @@ std::vector<std::size_t> MultiIndexHash::query(std::uint64_t query_hash) const {
         if (it == tables_[b].end()) continue;
 
         for (const auto& entry : it->second) {
+            if (checks >= max_checks) {
+                std::vector<std::size_t> result(seen.begin(), seen.end());
+                std::sort(result.begin(), result.end());
+                return result;
+            }
+            ++checks;
+
             // Full Hamming-distance verification.
             if (popcount64(query_hash ^ entry.full_hash) <= threshold_) {
                 seen.insert(entry.image_index);
@@ -74,7 +91,9 @@ std::vector<std::size_t> MultiIndexHash::query(std::uint64_t query_hash) const {
         }
     }
 
-    return {seen.begin(), seen.end()};
+    std::vector<std::size_t> result(seen.begin(), seen.end());
+    std::sort(result.begin(), result.end());
+    return result;
 }
 
 }  // namespace edgegallery

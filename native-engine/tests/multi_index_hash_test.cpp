@@ -84,6 +84,15 @@ void test_many_insertions() {
     expect(!results.empty(), "at least the self-match is returned");
 }
 
+void test_query_result_limit() {
+    MultiIndexHash mih(8);
+    for (std::size_t i = 0; i < 1000; ++i) {
+        mih.insert(i, 0xAAAAAAAAAAAAAAAAULL);
+    }
+    const auto results = mih.query(0xAAAAAAAAAAAAAAAAULL, 64);
+    expect(results.size() == 64, "dense MIH buckets respect the candidate limit");
+}
+
 }  // namespace
 
 int main() {
@@ -93,6 +102,7 @@ int main() {
     test_boundary_threshold();
     test_empty_index_returns_empty();
     test_many_insertions();
+    test_query_result_limit();
 
     if (failures != 0) {
         std::cerr << failures << " MIH test(s) failed\n";

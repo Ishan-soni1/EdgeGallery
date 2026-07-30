@@ -1,7 +1,9 @@
 package com.edgegallery.app
 
 import android.app.Application
+import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.edgegallery.app.model.ImageFeatures
@@ -31,8 +33,29 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
     val uiState: StateFlow<ScanUiState> = mutableUiState.asStateFlow()
 
     fun selectImages(selectedImages: List<Uri>) {
-        // A picker should not return duplicates, but distinct() makes the contract explicit.
-        mutableUiState.value = ScanUiState.Ready(selectedImages.distinct())
+        // Keep access after configuration changes and app restarts when the
+        // selected document provider supports persistable permissions.
+        val resolver = getApplication<Application>().contentResolver
+        val images = selectedImages.distinct().take(MAX_SELECTED_IMAGES)
+        images.forEach { uri ->
+            try {
+                resolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            } catch (_: SecurityException) {
+                try {
+                    resolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                } catch (_: SecurityException) {
+                    // Some providers grant access only for the current activity.
+                }
+            }
+        }
+        mutableUiState.value = ScanUiState.Ready(images)
     }
 
     fun startScan() {
@@ -85,13 +108,9 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
 
             try {
                 val groups = NativeEngine.findDuplicateGroups(features)
-                // Compute comparisons only within groups (Phase 3 optimization).
-                // This replaces the old O(n²) all-pairs scan with O(Σ gᵢ²) where
-                // gᵢ is the size of each group — typically much smaller.
-                val featuresById = features.associateBy(ImageFeatures::id)
-                val comparisons = groups.flatMap { group ->
-                    SimilarityMath.comparisonsFor(group.memberIds, featuresById)
-                }
+                // NativeEngine already returns a small, bounded sample of
+                // evidence for each group; do not rebuild a global pair matrix.
+                val comparisons = groups.flatMap { group -> group.comparisons }
                 mutableUiState.value = ScanUiState.Completed(
                     features = features,
                     groups = groups,
@@ -112,10 +131,94 @@ class EdgeGalleryViewModel(application: Application) : AndroidViewModel(applicat
         mutableUiState.value = ScanUiState.Ready()
     }
 
+    /**
+     * Permanently deletes only the photos explicitly selected in the results
+     * screen. The UI presents a confirmation dialog before calling this method.
+     */
+    fun deletePhotos(photoIds: Set<String>) {
+        val completed = mutableUiState.value as? ScanUiState.Completed ?: return
+        if (completed.isDeleting || photoIds.isEmpty()) return
+
+        val requested = completed.features.filter { it.id in photoIds }
+        if (requested.isEmpty()) return
+
+        mutableUiState.value = completed.copy(
+            isDeleting = true,
+            actionMessage = null,
+        )
+
+        viewModelScope.launch {
+            val deletedIds = mutableSetOf<String>()
+            val failures = mutableListOf<String>()
+            val resolver = getApplication<Application>().contentResolver
+
+            withContext(Dispatchers.IO) {
+                requested.forEach { feature ->
+                    try {
+                        val deleted = if (
+                            DocumentsContract.isDocumentUri(
+                                getApplication<Application>(),
+                                feature.uri,
+                            )
+                        ) {
+                            DocumentsContract.deleteDocument(resolver, feature.uri)
+                        } else {
+                            resolver.delete(feature.uri, null, null) > 0
+                        }
+
+                        if (deleted) {
+                            deletedIds += feature.id
+                        } else {
+                            failures += feature.displayName
+                        }
+                    } catch (_: Exception) {
+                        failures += feature.displayName
+                    }
+                }
+            }
+
+            val latest = mutableUiState.value as? ScanUiState.Completed ?: return@launch
+            val remainingFeatures = latest.features.filterNot { it.id in deletedIds }
+            val featuresById = remainingFeatures.associateBy(ImageFeatures::id)
+            val remainingGroups = latest.groups.mapNotNull { group ->
+                val memberIds = group.memberIds.filterNot { it in deletedIds }
+                if (memberIds.size < 2) {
+                    null
+                } else {
+                    group.copy(
+                        memberIds = memberIds,
+                        comparisons = SimilarityMath.comparisonsFor(memberIds, featuresById),
+                    )
+                }
+            }
+            val remainingComparisons = remainingGroups.flatMap { it.comparisons }
+            val message = when {
+                deletedIds.isNotEmpty() && failures.isEmpty() ->
+                    "Deleted ${deletedIds.size} photo${if (deletedIds.size == 1) "" else "s"}."
+                deletedIds.isNotEmpty() ->
+                    "Deleted ${deletedIds.size}; ${failures.size} could not be deleted."
+                else ->
+                    "No photos were deleted. The selected storage provider may not allow deletion."
+            }
+
+            mutableUiState.value = latest.copy(
+                features = remainingFeatures,
+                groups = remainingGroups,
+                comparisons = remainingComparisons,
+                isDeleting = false,
+                actionMessage = message,
+            )
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         if (embeddingExtractor.isInitialized()) {
             embeddingExtractor.value.close()
         }
+    }
+
+    private companion object {
+        const val MAX_SELECTED_IMAGES = 100
     }
 }

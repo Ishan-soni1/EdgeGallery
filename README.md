@@ -17,8 +17,8 @@ In a basic photo deduplication app, every photo is blindly compared with every o
 * For **1,000 photos** $\rightarrow$ **499,500 comparisons**
 * For **10,000 photos** $\rightarrow$ **49,995,000 comparisons** (CPU lockup, severe thermal throttling, and multi-minute freezes)
 
-### The Optimized $O(N \cdot m)$ Engine Architecture
-EdgeGallery transforms this quadratic bottleneck into a sub-linear candidate lookup engine using a **4-Phase Cascaded Pipeline**:
+### The Near-Linear Candidate Architecture
+EdgeGallery replaces global all-pairs comparison with a **4-phase candidate pipeline**:
 
 ```
                        +-------------------------------------------------------+
@@ -32,8 +32,8 @@ EdgeGallery transforms this quadratic bottleneck into a sub-linear candidate loo
                                                    |
                                                    v (collapse exact duplicates to 1 representative per hash)
    Phase 1             +-------------------------------------------------------+
-   Sub-linear          |      Multi-Index Hashing (MIH) Hamming Indexing       |
-   Perceptual Search   |        Pigeonhole lookup: [O(N · m) where m << N]     |
+   Candidate Search    |   MIH for dHash + random-hyperplane LSH for vectors   |
+                       |       [bounded local candidates, not every pair]       |
                        +-------------------------------------------------------+
                                                    |
                                                    v (candidate pairs only)
@@ -45,7 +45,7 @@ EdgeGallery transforms this quadratic bottleneck into a sub-linear candidate loo
                                                    v
    Phase 3             +-------------------------------------------------------+
    Graph Clustering &  |   Disjoint Set Union (DSU) Connected Components [O(N)]|
-   UI Display          |   Isolated Local Group Comparisons: O(Σ gᵢ²) (gᵢ << N) |
+   UI Display          |       At most 20 evidence pairs shown per group       |
                        +-------------------------------------------------------+
 ```
 
@@ -59,7 +59,7 @@ EdgeGallery categorizes photo relationships into three distinct tiers:
 | :--- | :--- | :--- | :--- | :--- |
 | **1. Exact Duplicates** | **SHA-256** | Streaming 256-bit cryptographic digest over file bytes. | Identical file copies, exact downloads. | $O(N)$ Hash Table |
 | **2. Modified Copies** | **64-bit dHash** | Perceptual difference hash computed from a $9 \times 8$ luminance thumbnail. Captures spatial brightness gradients. | Resized images, recompressed JPEGs, minor edits, color shifts. | $O(N \cdot m)$ via **MIH** |
-| **3. Related Photos** | **MobileNet V3 Small** | On-device LiteRT / TensorFlow Lite neural embedding (128-d vector). Calculates cosine similarity angle. | Different shots of the same scene, burst shots, semantic similarity. | $O(R^2)$ over collapsed representatives |
+| **3. Related Photos** | **MobileNet V3 Small + LSH** | On-device neural embeddings are placed in deterministic similarity buckets before exact cosine verification. | Different shots of the same scene, burst shots, semantic similarity. | Near-linear candidate pass; at most 256 cosine candidates per photo |
 
 ---
 
@@ -73,29 +73,36 @@ EdgeGallery implements **Multi-Index Hashing (MIH)** based on the **Pigeonhole P
 * If two 64-bit hashes differ by at most $r$ bits, **at least one sub-block must be 100% identical**.
 * We build direct hash table lookups for each sub-block. Searching for candidates requires querying only matching sub-blocks, eliminating $99.9\%$ of irrelevant pairs!
 
-### 2. Disjoint Set Union (DSU) Graph Clustering
+### 2. Random-Hyperplane LSH for Neural Embeddings
+The embedding stage uses a deliberately simple locality-sensitive hash:
+* Each embedding is projected onto deterministic random hyperplanes.
+* The positive/negative signs form short binary bucket keys.
+* A query checks only its exact bucket and keys one bit away across 12 tables.
+* Exact cosine similarity is calculated only for those candidates.
+* Candidate work is capped at 256 earlier photos per image, preventing a dense bucket from becoming an all-pairs scan.
+
+This is approximate search: it trades a small possibility of missing a related-photo match for predictable on-device performance. Exact byte and dHash duplicate detection remain deterministic.
+
+### 3. Disjoint Set Union (DSU) Graph Clustering
 Instead of heavy complete-link graph clustering ($O(N^3)$), near-duplicates are linked into connected components using **Disjoint Set Union (DSU)** with path compression and rank optimization:
 * `find(x)`: $O(\alpha(N)) \approx O(1)$
 * `unite(x, y)`: Instantly merges duplicate items into unified clusters.
 
-### 3. Aspect Ratio & File Size Metadata Pre-Filtering
+### 4. Aspect Ratio & File Size Metadata Pre-Filtering
 Before evaluating expensive floating-point cosine similarities or bitwise operations, candidate pairs must pass strict metadata sanity bounds:
 * **Aspect Ratio Check**: $\frac{\text{AR}_{\text{left}}}{\text{AR}_{\text{right}}} \le 1.20$ (rejects pairings between landscape and portrait photos).
 * **File Size Check**: $\max(\text{Size}_A, \text{Size}_B) \le 10 \times \min(\text{Size}_A, \text{Size}_B)$ (rejects pairing high-res originals with tiny thumbnails).
 
-### 4. Group-Isolated UI Matrix Computation
-The UI previously computed pairwise similarity scores across all scanned photos ($O(N^2)$). We refactored this to evaluate comparisons **only within identified DSU groups** ($O(\sum g_i^2)$), keeping the Android UI thread at 60 FPS even with 10,000+ photos.
+### 5. Bounded UI Evidence
+The UI never rebuilds a global pair matrix. It displays at most 20 exact comparison records per result group, so a large group cannot reintroduce quadratic work after native clustering.
 
 ---
 
-## 📊 Performance Comparison Benchmark
+## 🗣️ Interview-Friendly Explanation
 
-| Dataset Size ($N$) | Naive $O(N^2)$ Pairwise Checks | Optimized EdgeGallery Engine Checks | Speedup Factor |
-| :--- | :--- | :--- | :--- |
-| **100 Photos** | 4,950 comparisons | ~150 checks | **33x Faster** |
-| **1,000 Photos** | 499,500 comparisons | ~1,800 checks | **277x Faster** |
-| **5,000 Photos** | 12,497,500 comparisons | ~9,500 checks | **1,315x Faster** |
-| **10,000 Photos** | 49,995,000 comparisons | ~21,000 checks | **> 2,300x Faster** (< 50ms native execution) |
+> “First I hash file bytes, so exact duplicates fall into the same hash-map bucket in one pass. For edited copies I use Multi-Index Hashing on a 64-bit perceptual hash. For neural embeddings I use Locality-Sensitive Hashing: similar vectors are likely to land in the same small buckets, and I run exact cosine similarity only on those candidates. Finally, Disjoint Set Union merges matching candidates into groups. The app therefore avoids comparing every photo with every other photo.”
+
+For $N$ photos, the semantic pass performs at most $256N$ exact cosine checks instead of $\frac{N(N-1)}{2}$. Feature extraction and fixed-size index work are linear in the number of selected photos.
 
 ---
 
@@ -172,7 +179,7 @@ cmake --build build_test
 ## 🔒 Privacy & Safety Guarantee
 
 * **No Network Permissions**: EdgeGallery does not request or require internet access.
-* **Non-Destructive**: EdgeGallery identifies duplicates and provides exposure metrics; it **never automatically deletes** files.
+* **User-Controlled Deletion**: EdgeGallery never deletes automatically. The user must select photos and confirm a permanent-delete warning; unsupported storage providers fail safely.
 * **On-Device Machine Learning**: MobileNet V3 runs entirely via LiteRT (TensorFlow Lite) in local device RAM.
 
 ---

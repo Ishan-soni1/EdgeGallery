@@ -46,6 +46,10 @@ object SimilarityMath {
                         cosineSimilarity = cosineSimilarity(left.embedding, right.embedding),
                     ),
                 )
+                // Evidence is diagnostic UI data, not part of clustering.
+                // Keeping a small sample prevents one huge group from creating
+                // another quadratic all-pairs matrix on the Kotlin side.
+                if (size >= MAX_GROUP_COMPARISONS) return@buildList
             }
         }
     }
@@ -55,4 +59,6 @@ object SimilarityMath {
             memberIds = features.map(ImageFeatures::id),
             featuresById = features.associateBy(ImageFeatures::id),
         )
+
+    private const val MAX_GROUP_COMPARISONS = 20
 }

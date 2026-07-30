@@ -96,6 +96,8 @@ sealed interface ScanUiState {
         val groups: List<DuplicateGroup>,
         val comparisons: List<ImageComparison>,
         val issues: List<ScanIssue>,
+        val isDeleting: Boolean = false,
+        val actionMessage: String? = null,
     ) : ScanUiState
 
     data class Failed(val message: String) : ScanUiState

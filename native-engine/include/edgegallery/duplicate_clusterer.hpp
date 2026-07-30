@@ -40,6 +40,11 @@ struct ClusterOptions {
     bool include_singletons = false;
 };
 
+struct ClusterStats {
+    // Number of exact cosine checks made after candidate lookup.
+    std::size_t embedding_comparisons = 0;
+};
+
 std::uint32_t hamming_distance(std::uint64_t left, std::uint64_t right) noexcept;
 
 // Returns the cosine similarity between two embedding vectors.
@@ -54,6 +59,7 @@ float cosine_similarity(const std::vector<float>& left,
 // Throws std::invalid_argument for an empty/duplicate id or an invalid threshold.
 std::vector<DuplicateGroup> cluster_duplicates(
     const std::vector<ImageFingerprint>& images,
-    const ClusterOptions& options = {});
+    const ClusterOptions& options = {},
+    ClusterStats* stats = nullptr);
 
 }  // namespace edgegallery

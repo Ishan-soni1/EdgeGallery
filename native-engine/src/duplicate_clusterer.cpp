@@ -1,5 +1,6 @@
 #include "edgegallery/duplicate_clusterer.hpp"
 #include "edgegallery/disjoint_set.hpp"
+#include "edgegallery/embedding_lsh.hpp"
 #include "edgegallery/multi_index_hash.hpp"
 
 #include <algorithm>
@@ -12,6 +13,8 @@
 
 namespace edgegallery {
 namespace {
+
+constexpr std::size_t kPerceptualCandidateLimit = 256;
 
 /// Returns true when two images pass the metadata pre-filter.
 /// Skipped when either image has no metadata (width/height == 0).
@@ -77,9 +80,13 @@ float cosine_similarity(
 
 std::vector<DuplicateGroup> cluster_duplicates(
     const std::vector<ImageFingerprint>& images,
-    const ClusterOptions& options) {
-    if (options.hamming_threshold > 64) {
-        throw std::invalid_argument("hamming_threshold must be between 0 and 64");
+    const ClusterOptions& options,
+    ClusterStats* stats) {
+    if (stats != nullptr) {
+        *stats = {};
+    }
+    if (options.hamming_threshold > MultiIndexHash::kMaxThreshold) {
+        throw std::invalid_argument("hamming_threshold must be between 0 and 15");
     }
     if (!std::isfinite(options.similarity_threshold) ||
         options.similarity_threshold < 0.0f ||
@@ -159,7 +166,7 @@ std::vector<DuplicateGroup> cluster_duplicates(
     // ---------------------------------------------------------------
     // Phase 1: Multi-Index Hashing for dHash near-duplicates  — O(n·m)
     // ---------------------------------------------------------------
-    if (options.hamming_threshold > 0 && options.hamming_threshold <= MultiIndexHash::kMaxThreshold) {
+    if (options.hamming_threshold > 0) {
         // Collect representatives that have a valid perceptual hash.
         std::vector<std::size_t> hashable_reps;
         hashable_reps.reserve(representatives.size());
@@ -170,24 +177,13 @@ std::vector<DuplicateGroup> cluster_duplicates(
         }
 
         if (hashable_reps.size() >= 2) {
-            // Map each hashable representative to a compact 0..K index.
-            std::unordered_map<std::size_t, std::size_t> rep_to_local;
-            rep_to_local.reserve(hashable_reps.size());
-            for (std::size_t k = 0; k < hashable_reps.size(); ++k) {
-                rep_to_local[hashable_reps[k]] = k;
-            }
-
             MultiIndexHash mih(options.hamming_threshold);
-            for (std::size_t k = 0; k < hashable_reps.size(); ++k) {
-                mih.insert(k, images[hashable_reps[k]].perceptual_hash);
-            }
-
             DisjointSet dsu(hashable_reps.size());
             for (std::size_t k = 0; k < hashable_reps.size(); ++k) {
                 const auto candidates = mih.query(
-                    images[hashable_reps[k]].perceptual_hash);
+                    images[hashable_reps[k]].perceptual_hash,
+                    kPerceptualCandidateLimit);
                 for (const std::size_t candidate_k : candidates) {
-                    if (candidate_k <= k) continue;  // avoid duplicate pairs
                     // Phase 2: metadata pre-filter.
                     if (!passes_metadata_filter(
                             images[hashable_reps[k]],
@@ -196,6 +192,7 @@ std::vector<DuplicateGroup> cluster_duplicates(
                     }
                     dsu.unite(k, candidate_k);
                 }
+                mih.insert(k, images[hashable_reps[k]].perceptual_hash);
             }
 
             for (auto& local_group : dsu.groups(/*min_size=*/2)) {
@@ -212,55 +209,23 @@ std::vector<DuplicateGroup> cluster_duplicates(
                 result.push_back(std::move(group));
             }
         }
-    } else if (options.hamming_threshold > 0) {
-        // Threshold too large for MIH — fall back to brute-force pairwise scan.
-        DisjointSet dsu(representatives.size());
-        for (std::size_t i = 0; i < representatives.size(); ++i) {
-            if (!images[representatives[i]].has_perceptual_hash) continue;
-            for (std::size_t j = i + 1; j < representatives.size(); ++j) {
-                if (!images[representatives[j]].has_perceptual_hash) continue;
-                if (hamming_distance(
-                        images[representatives[i]].perceptual_hash,
-                        images[representatives[j]].perceptual_hash)
-                    <= options.hamming_threshold) {
-                    if (passes_metadata_filter(
-                            images[representatives[i]],
-                            images[representatives[j]])) {
-                        dsu.unite(i, j);
-                    }
-                }
-            }
-        }
-        for (auto& local_group : dsu.groups(/*min_size=*/2)) {
-            DuplicateGroup group{DuplicateKind::ModifiedCopy, {}};
-            group.member_ids.reserve(local_group.size());
-            std::sort(local_group.begin(), local_group.end(),
-                [&](std::size_t a, std::size_t b) {
-                    return representatives[a] < representatives[b];
-                });
-            for (const std::size_t local_idx : local_group) {
-                group.member_ids.push_back(images[representatives[local_idx]].id);
-            }
-            result.push_back(std::move(group));
-        }
     }
 
     // ---------------------------------------------------------------
-    // Phase 1b: Embedding-based "Related" grouping  — O(n·C)
-    // Uses MIH candidates to limit cosine checks.
+    // Phase 1b: Embedding-based "Related" grouping — near-linear candidate pass
+    // Uses random-hyperplane LSH buckets to limit exact cosine checks.
     // ---------------------------------------------------------------
     {
-        // Build a set of all pairs already in a ModifiedCopy group.
-        std::unordered_set<std::string> modified_copy_pairs;
+        // Remember modified-copy component membership in O(n), so the related
+        // pass can avoid returning the same relationship under a second label.
+        std::unordered_map<std::string, std::size_t> modified_group_by_id;
+        std::size_t modified_group_index = 0;
         for (const auto& group : result) {
             if (group.kind != DuplicateKind::ModifiedCopy) continue;
-            for (std::size_t i = 0; i < group.member_ids.size(); ++i) {
-                for (std::size_t j = i + 1; j < group.member_ids.size(); ++j) {
-                    const auto& a = group.member_ids[i];
-                    const auto& b = group.member_ids[j];
-                    modified_copy_pairs.insert(a < b ? a + "|" + b : b + "|" + a);
-                }
+            for (const auto& member_id : group.member_ids) {
+                modified_group_by_id[member_id] = modified_group_index;
             }
+            ++modified_group_index;
         }
 
         // Collect reps that have embeddings.
@@ -274,27 +239,38 @@ std::vector<DuplicateGroup> cluster_duplicates(
 
         if (embeddable_reps.size() >= 2) {
             DisjointSet dsu(embeddable_reps.size());
+            EmbeddingLsh embedding_index(
+                embedding_dimension,
+                embeddable_reps.size());
 
-            // For related-photo grouping, use brute force over embeddings
-            // since MIH only works on binary hashes, not float embeddings.
-            // This is still O(R^2) over representatives, but R << N because
-            // exact duplicates are already collapsed.
+            // Random-hyperplane LSH turns each embedding into short binary
+            // signatures. We only run exact cosine checks on photos found in
+            // the same or a neighbouring bucket. Candidate count is bounded,
+            // so this pass stays near-linear instead of comparing all pairs.
             for (std::size_t i = 0; i < embeddable_reps.size(); ++i) {
-                for (std::size_t j = i + 1; j < embeddable_reps.size(); ++j) {
-                    const auto& left = images[embeddable_reps[i]];
-                    const auto& right = images[embeddable_reps[j]];
+                const auto& current = images[embeddable_reps[i]];
+                const auto candidates = embedding_index.query_and_insert(
+                    i,
+                    current.embedding);
+                for (const std::size_t candidate : candidates) {
+                    const auto& earlier = images[embeddable_reps[candidate]];
 
-                    // Skip if already a modified copy.
-                    const auto& a = left.id;
-                    const auto& b = right.id;
-                    const auto pair_key = (a < b) ? a + "|" + b : b + "|" + a;
-                    if (modified_copy_pairs.count(pair_key)) continue;
+                    const auto current_group = modified_group_by_id.find(current.id);
+                    const auto earlier_group = modified_group_by_id.find(earlier.id);
+                    if (current_group != modified_group_by_id.end() &&
+                        earlier_group != modified_group_by_id.end() &&
+                        current_group->second == earlier_group->second) {
+                        continue;
+                    }
 
-                    if (!passes_metadata_filter(left, right)) continue;
+                    if (!passes_metadata_filter(current, earlier)) continue;
 
-                    if (cosine_similarity(left.embedding, right.embedding)
+                    if (stats != nullptr) {
+                        ++stats->embedding_comparisons;
+                    }
+                    if (cosine_similarity(current.embedding, earlier.embedding)
                         >= options.similarity_threshold) {
-                        dsu.unite(i, j);
+                        dsu.unite(i, candidate);
                     }
                 }
             }

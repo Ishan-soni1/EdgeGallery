@@ -60,7 +60,8 @@ std::vector<std::vector<std::size_t>> DisjointSet::groups(std::size_t min_size) 
 
     std::vector<std::vector<std::size_t>> result;
     result.reserve(buckets.size());
-    for (auto& [root, members] : buckets) {
+    for (auto& bucket : buckets) {
+        auto& members = bucket.second;
         if (members.size() >= min_size) {
             result.push_back(std::move(members));
         }

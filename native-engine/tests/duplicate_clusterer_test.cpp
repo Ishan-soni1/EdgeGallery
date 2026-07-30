@@ -11,6 +11,7 @@
 namespace {
 
 using edgegallery::ClusterOptions;
+using edgegallery::ClusterStats;
 using edgegallery::DuplicateKind;
 using edgegallery::ImageFingerprint;
 
@@ -154,6 +155,62 @@ void test_modified_copies_are_not_repeated_as_related_photos() {
         "dHash takes precedence over semantic similarity for the same pair");
 }
 
+void test_embedding_search_is_bounded_instead_of_all_pairs() {
+    constexpr std::size_t image_count = 2000;
+    constexpr std::size_t dimension = 32;
+    std::vector<ImageFingerprint> images;
+    images.reserve(image_count);
+
+    for (std::size_t image = 0; image < image_count; ++image) {
+        std::vector<float> embedding(dimension);
+        for (std::size_t value = 0; value < dimension; ++value) {
+            const auto mixed = (image * 7919 + value * 104729) % 1009;
+            embedding[value] = static_cast<float>(mixed) / 1009.0f;
+        }
+        images.push_back({
+            "image-" + std::to_string(image),
+            "sha-" + std::to_string(image),
+            0,
+            false,
+            std::move(embedding),
+        });
+    }
+
+    ClusterOptions options;
+    options.similarity_threshold = 1.0f;
+    ClusterStats stats;
+    edgegallery::cluster_duplicates(images, options, &stats);
+
+    const std::size_t all_pairs = image_count * (image_count - 1) / 2;
+    expect(
+        stats.embedding_comparisons <= image_count * 256,
+        "embedding candidate checks are capped per image");
+    expect(
+        stats.embedding_comparisons < all_pairs / 2,
+        "embedding search does not fall back to an all-pairs scan");
+}
+
+void test_dense_embedding_bucket_still_forms_one_group() {
+    std::vector<ImageFingerprint> images;
+    for (std::size_t index = 0; index < 600; ++index) {
+        images.push_back({
+            "same-" + std::to_string(index),
+            "sha-" + std::to_string(index),
+            0,
+            false,
+            {1.0f, 0.5f, 0.25f, 0.125f},
+        });
+    }
+
+    ClusterOptions options;
+    options.similarity_threshold = 0.99f;
+    const auto groups = edgegallery::cluster_duplicates(images, options);
+    expect(groups.size() == 1, "a dense LSH bucket produces one related group");
+    expect(
+        !groups.empty() && groups[0].member_ids.size() == images.size(),
+        "the candidate cap still connects every identical embedding");
+}
+
 void test_validation() {
     expect_invalid_argument(
         [] { edgegallery::cluster_duplicates({{"", "hash", 0, true, {1.0f}}}); },
@@ -169,7 +226,7 @@ void test_validation() {
     expect_invalid_argument(
         [] {
             ClusterOptions options;
-            options.hamming_threshold = 65;
+            options.hamming_threshold = 16;
             edgegallery::cluster_duplicates({}, options);
         },
         "invalid Hamming thresholds are rejected");
@@ -207,6 +264,8 @@ int main() {
     test_dsu_connects_transitive_similar_images();
     test_missing_features_and_singletons();
     test_modified_copies_are_not_repeated_as_related_photos();
+    test_embedding_search_is_bounded_instead_of_all_pairs();
+    test_dense_embedding_bucket_still_forms_one_group();
     test_validation();
 
     if (failures != 0) {
